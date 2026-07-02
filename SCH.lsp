@@ -93,7 +93,9 @@
   (if s (vl-string-trim " \t" s) ""))
 
 ;; Strip common MTEXT formatting codes; \Sa#b; becomes a/b.
-(defun sch:strip-fmt (s / i n c out code)
+;; Handles semicolon-less codes (\P \~ \\ \{ \} \L \l \O \o \K \k)
+;; separately from ;-terminated ones (\A1; \H0.7x; \S4#4; \C \f \p ...).
+(defun sch:strip-fmt (s / i n c out code nxt)
   (if (null s) (setq s ""))
   (setq i 1 n (strlen s) out "")
   (while (<= i n)
@@ -101,17 +103,27 @@
     (cond
       ((or (= c "{") (= c "}")) (setq i (1+ i)))
       ((= c "\\")
-       (setq code "" i (1+ i))
-       (while (and (<= i n) (/= (substr s i 1) ";")
-                   (< (strlen code) 40))
-         (setq code (strcat code (substr s i 1)) i (1+ i)))
-       (setq i (1+ i)) ; skip ";"
+       (setq nxt (if (< i n) (substr s (1+ i) 1) ""))
        (cond
-         ((and (> (strlen code) 1) (= (strcase (substr code 1 1)) "S"))
-          ;; stacked fraction \S4#4; -> 4/4
-          (setq out (strcat out
-                            (vl-string-translate "#" "/" (substr code 2)))))
-         ((= (strcase code) "P") (setq out (strcat out " ")))))
+         ((member nxt '("\\" "{" "}")) ; escaped literals
+          (setq out (strcat out nxt) i (+ i 2)))
+         ((member nxt '("P" "~")) ; hard line break / nbsp -> space
+          (setq out (strcat out " ") i (+ i 2)))
+         ((member nxt '("L" "l" "O" "o" "K" "k")) ; format toggles
+          (setq i (+ i 2)))
+         (t ; ;-terminated codes
+          (setq code "" i (1+ i))
+          (while (and (<= i n) (/= (substr s i 1) ";")
+                      (< (strlen code) 40))
+            (setq code (strcat code (substr s i 1)) i (1+ i)))
+          (if (and (<= i n) (= (substr s i 1) ";"))
+            (setq i (1+ i))) ; skip ";" only if actually there
+          (if (and (> (strlen code) 1)
+                   (= (strcase (substr code 1 1)) "S"))
+            ;; stacked fraction \S4#4; -> 4/4
+            (setq out (strcat out
+                              (vl-string-translate "#" "/"
+                                                   (substr code 2))))))))
       (t (setq out (strcat out c)) (setq i (1+ i)))))
   (sch:trim out))
 
@@ -121,6 +133,8 @@
         rem (- in (* ft 12)))
   (if (equal rem (float (fix (+ rem 0.5e-3))) 1e-2)
     (setq rem (float (fix (+ rem 0.5e-3)))))
+  (if (>= rem 11.95) ; carry rounded-up inches into feet: 2'-12" -> 3'-0"
+    (setq ft (1+ ft) rem 0.0))
   (strcat (itoa ft) "'-"
           (if (equal rem (float (fix rem)) 1e-6)
             (itoa (fix rem))
@@ -161,9 +175,11 @@
 ;;; Geometry utilities
 ;;; ------------------------------------------------------------------
 
-(defun sch:bbox (vlaObj / mn mx r)
-  (setq r (sch:catch 'vla-GetBoundingBox (list vlaObj 'mn 'mx)))
-  (if (and r mn mx)
+(defun sch:bbox (vlaObj / mn mx)
+  ;; GetBoundingBox is a void method — success is signaled by the
+  ;; out-params mn/mx being filled, never by the return value.
+  (sch:catch 'vla-GetBoundingBox (list vlaObj 'mn 'mx))
+  (if (and mn mx)
     (list (vlax-safearray->list mn) (vlax-safearray->list mx))))
 
 (defun sch:bbox-center (vlaObj / bb)
@@ -573,16 +589,16 @@
         (progn
           (setq d (distance pt (car s)))
           (if (< d bestd) (setq bestd d best s)))))
+    (setq d (if best (sch:parse-size (cadr best))))
     (setq rec (list (cons "KIND" (caddr b))
                     (cons "MARK" (cadr b))
                     (cons "CODE" (if best (cadr best) ""))
-                    (cons "MULT" 1) (cons "HAND" nil)
+                    (cons "MULT" (if d (car d) 1))
+                    (cons "WIN" (if d (cadr d)))
+                    (cons "HIN" (if d (caddr d)))
+                    (cons "HAND" nil)
                     (cons "CASED" nil) (cons "WALL" nil)
                     (cons "STYLE" "") (cons "SRC" "tag")))
-    (if (and best (setq d (sch:parse-size (cadr best))))
-      (setq rec (append rec (list (cons "WIN" (cadr d))
-                                  (cons "HIN" (caddr d))
-                                  (cons "MULT" (car d))))))
     (setq out (cons rec out)))
   out)
 
@@ -639,8 +655,18 @@
                    (if (sch:pt-in-box wpt p1 p2)
                      (setq inserts (cons (cons e wpt) inserts)))))))))
       nil))
+  ;; same rule as the top-level harvest: tag records only for kinds
+  ;; with no AEC objects found (avoids double-counting tagged doors)
   (if inserts
-    (setq out (append out (sch:harvest-tag-inserts inserts))))
+    (setq out
+      (append out
+        (vl-remove-if
+          '(lambda (r)
+             (vl-some '(lambda (q) (and (= (sch:rget q "KIND")
+                                           (sch:rget r "KIND"))
+                                        (= (sch:rget q "SRC") "aec")))
+                      out))
+          (sch:harvest-tag-inserts inserts)))))
   out)
 
 ;; main harvest: user picks two corners; returns list of records
@@ -667,7 +693,9 @@
               ((= on "AecDbOpening") (setq kind "DOOR" cased T)))
             (cond
               (kind
-               (setq recs (cons (sch:harvest-aec v kind cased walls T)
+               ;; swing-hand detection is doors-only
+               (setq recs (cons (sch:harvest-aec v kind cased walls
+                                                 (= kind "DOOR"))
                                 recs)))
               ((= on "AcDbBlockReference")
                (setq isxref nil)
@@ -767,9 +795,12 @@
 
 (defun sch:pick-table (prompt / es v done out)
   (while (not done)
+    (setvar "ERRNO" 0)
     (setq es (entsel prompt))
     (cond
-      ((null es) (setq done T out nil)) ; user pressed Enter/Esc
+      ((and (null es) (= (getvar "ERRNO") 7)) ; missed pick — re-prompt
+       (princ "\n[SCH] Nothing there — pick the table or press Enter to skip."))
+      ((null es) (setq done T out nil)) ; genuine Enter = skip
       (t
        (setq v (sch:vla (car es)))
        (if (= (sch:objname v) "AcDbTable")
@@ -872,6 +903,10 @@
   (setq marks (nth 5 info))
   (foreach m marks
     (if (/= (car m) "") (setq used (cons (car m) used))))
+  ;; marks already carried by harvested aggs are taken too — a freshly
+  ;; assigned mark must not collide with a tagged opening in this run
+  (foreach a aggs
+    (if (/= (car a) "") (setq used (cons (car a) used))))
   ;; assign marks to unmarked aggs
   (setq aggs
     (mapcar
@@ -947,9 +982,13 @@
 ;;; Preview dialog (DCL written to temp file)
 ;;; ------------------------------------------------------------------
 
+;; returns the DCL path, or nil if the temp file cannot be created
 (defun sch:dcl-file ( / path f)
   (setq path (vl-filename-mktemp "sch_prev.dcl"))
   (setq f (open path "w"))
+  (if (null f)
+    nil
+    (progn
   (write-line "sch_preview : dialog {" f)
   (write-line "  label = \"SCH - Schedule Fill Preview\";" f)
   (write-line "  : text { key = \"summary\"; width = 110; }" f)
@@ -974,7 +1013,7 @@
   (write-line "  }" f)
   (write-line "}" f)
   (close f)
-  path)
+  path)))
 
 (defun sch:plan-line (p / flag)
   (setq flag (nth 8 p))
@@ -985,7 +1024,7 @@
 
 (defun sch:preview (wplan dplan notes / dclpath dclid ok line)
   (setq dclpath (sch:dcl-file)
-        dclid (load_dialog dclpath)
+        dclid (if dclpath (load_dialog dclpath) 0)
         ok nil)
   (if (and dclid (> dclid 0) (new_dialog "sch_preview" dclid))
     (progn
@@ -1010,8 +1049,7 @@
       (action_tile "hm_desc" "(setq *sch:handmode* \"desc\")")
       (action_tile "accept" "(done_dialog 1)")
       (action_tile "cancel" "(done_dialog 0)")
-      (setq ok (= (start_dialog) 1))
-      (unload_dialog dclid))
+      (setq ok (= (start_dialog) 1)))
     (progn
       ;; DCL failed — fall back to command-line preview + confirm
       (princ "\n--- SCH preview (dialog unavailable) ---")
@@ -1026,7 +1064,10 @@
       (foreach x notes (princ (strcat "\n  NOTE: " x)))
       (initget "Yes No")
       (setq ok (= (getkword "\nApply to tables? [Yes/No] <No>: ") "Yes"))))
-  (vl-file-delete dclpath)
+  ;; unload whenever a dialog was actually loaded (even if new_dialog
+  ;; failed and we fell back to the command line)
+  (if (and dclid (> dclid 0)) (unload_dialog dclid))
+  (if dclpath (vl-file-delete dclpath))
   ok)
 
 ;;; ------------------------------------------------------------------
@@ -1049,13 +1090,27 @@
       (setq info (sch:table-info tbl))))
   info)
 
-;; append a new data row at the bottom; returns new row index or nil
-(defun sch:append-row (tbl info / rows h)
+;; append a new data row at the bottom; returns new row index or nil.
+;; InsertRows is a void method — success is verified by the row count
+;; actually growing, never by the (always-nil) return value.
+(defun sch:append-row (tbl info / rows h newrows)
   (setq rows (nth 3 info))
   (setq h (sch:invoke tbl 'GetRowHeight (list (1- rows))))
   (if (null h) (setq h 12.0))
-  (if (sch:invoke tbl 'InsertRows (list rows h 1))
-    rows))
+  (sch:invoke tbl 'InsertRows (list rows h 1))
+  (setq newrows (sch:prop tbl 'Rows))
+  (if (and newrows (> newrows rows)) rows))
+
+;; remove a previously appended "N LH / N RH" clause from a description
+;; so re-runs refresh the counts instead of keeping stale ones
+(defun sch:strip-hand (s / i j)
+  (if (setq i (vl-string-search " LH / " s)) ; 0-based match position
+    (progn
+      (setq j i) ; 1-based index of the char just before the match
+      (while (and (> j 0) (wcmatch (substr s j 1) "#"))
+        (setq j (1- j))) ; walk back over the LH count digits
+      (vl-string-right-trim " -" (substr s 1 j)))
+    s))
 
 (defun sch:apply-plan (tbl info plan kind / r p rowidx desc lhc rhc
                          written handcols)
@@ -1090,10 +1145,10 @@
                   (setq desc (sch:strip-fmt
                                (sch:tbl-get tbl rowidx
                                             (sch:col info "DESCRIPTION")))))
-                (if (not (wcmatch desc "*LH /*"))
-                  (setq desc (strcat desc
-                               (if (= desc "") "" " - ")
-                               (nth 5 p) " LH / " (nth 6 p) " RH")))))
+                (setq desc (sch:strip-hand desc))
+                (setq desc (strcat desc
+                             (if (= desc "") "" " - ")
+                             (nth 5 p) " LH / " (nth 6 p) " RH"))))
             (if desc
               (sch:tbl-set tbl rowidx (sch:col info "DESCRIPTION") desc))
             (setq written (1+ written)))))))
@@ -1201,6 +1256,9 @@
                           (if ss (itoa (sslength ss)) "0"))))
 
 (defun sch:diag-props (f obj / names v)
+  (if (not (and obj (eq (type obj) 'VLA-OBJECT)))
+    (sch:diag-out f "    (no VLA object - properties unavailable)")
+    (progn
   (setq names '("Width" "Height" "Rise" "Leaf" "StyleName" "Style"
                 "Location" "InsertionPoint" "Position" "Normal" "Rotation"
                 "OpeningPercent" "Swing" "SwingDirection" "Hand" "Handing"
@@ -1224,7 +1282,7 @@
                          (vl-princ-to-string
                            (sch:catch 'vlax-safearray->list (list v))))
                         (v (vl-princ-to-string v))
-                        (t "nil"))))))))
+                        (t "nil"))))))))))
 
 (defun sch:diag-psets (f obj / psets)
   (setq psets (sch:psets obj))
