@@ -1,13 +1,13 @@
 ;;; ===================================================================
-;;; SCH.lsp — DSLD Schedule of Openings auto-fill
+;;; SCH.lsp - DSLD Schedule of Openings auto-fill
 ;;; Target platform: AutoCAD Architecture (ACA)
 ;;;
 ;;; Commands:
-;;;   SCH      — harvest door/window/opening data from a selected plan
+;;;   SCH      - harvest door/window/opening data from a selected plan
 ;;;              region, preview the proposed WINDOW SCHEDULE and DOOR
 ;;;              SCHEDULE contents in a dialog, then write the accepted
 ;;;              values into the two ACAD_TABLE schedule tables.
-;;;   SCHDIAG  — diagnostic: census of AEC objects / tags / tables in
+;;;   SCHDIAG  - diagnostic: census of AEC objects / tags / tables in
 ;;;              the drawing, plus deep-dump of picked entities
 ;;;              (properties, property sets, explode test). Writes
 ;;;              SCHDIAG-report.txt next to the drawing. Run this in
@@ -24,7 +24,7 @@
 ;;;      plain INSERTs of TK_Door_Tag*_P / TK_Window_Tag*_P attributed
 ;;;      blocks (mark bubbles paired with size tags by proximity).
 ;;;
-;;; LH/RH swing: derived geometrically — the door is copied, the copy
+;;; LH/RH swing: derived geometrically - the door is copied, the copy
 ;;; exploded to primitives, the swing ARC + leaf line analyzed against
 ;;; the host wall direction, then all temp entities deleted.
 ;;; Convention (configurable below): viewer stands on the side the door
@@ -50,6 +50,11 @@
                                   ; bubble and its size tag (INSERT
                                   ; fallback provider), scaled by the
                                   ; bubble's insert scale.
+(setq *sch:use-aecx* T)           ; nil = never touch the AecX COM
+                                  ; interface (set nil if it crashes)
+(setq *sch:use-explode* T)        ; nil = skip geometric swing-hand
+                                  ; detection (set nil if it crashes)
+(setq *sch:diag-path* nil)        ; report path, set by SCHDIAG
 
 ;;; ------------------------------------------------------------------
 ;;; Generic guarded-call utilities
@@ -176,7 +181,7 @@
 ;;; ------------------------------------------------------------------
 
 (defun sch:bbox (vlaObj / mn mx)
-  ;; GetBoundingBox is a void method — success is signaled by the
+  ;; GetBoundingBox is a void method - success is signaled by the
   ;; out-params mn/mx being filled, never by the return value.
   (sch:catch 'vla-GetBoundingBox (list vlaObj 'mn 'mx))
   (if (and mn mx)
@@ -211,7 +216,7 @@
       (sch:vlen (sch:v- p proj)))))
 
 ;; transform a local point by an insert's placement (2D; handles
-;; mirror via negative scales; ignores OCS — plans are WCS)
+;; mirror via negative scales; ignores OCS - plans are WCS)
 (defun sch:xform-pt (pt ip rot sx sy / x y c s)
   (setq x (* (car pt) sx) y (* (cadr pt) sy)
         c (cos rot) s (sin rot))
@@ -225,11 +230,12 @@
        (<= (cadr p) (max (cadr p1) (cadr p2)))))
 
 ;;; ------------------------------------------------------------------
-;;; AecX bridge — property sets
+;;; AecX bridge - property sets
 ;;; ------------------------------------------------------------------
 
 (defun sch:sched-app ( / vlist app)
   (cond
+    ((not *sch:use-aecx*) nil)
     (*sch:schedapp* *sch:schedapp*)
     ((eq *sch:schedapp-failed* T) nil)
     (t
@@ -285,7 +291,7 @@
   out)
 
 ;;; ------------------------------------------------------------------
-;;; Walls — census and nearest-wall width
+;;; Walls - census and nearest-wall width
 ;;; ------------------------------------------------------------------
 
 ;; each wall record: (p1 p2 widthOrNil)
@@ -442,7 +448,7 @@
 ;; Returns "LH" / "RH" / nil.
 (defun sch:door-hand (vlaDoor walls / prims arcs lines best bestr ad
                       hinge r a1 a2 wrec wallP1 wallP2 leaf le hand)
-  (setq prims (sch:explode-copy vlaDoor))
+  (setq prims (if *sch:use-explode* (sch:explode-copy vlaDoor)))
   (if prims
     (progn
       (foreach o prims
@@ -501,7 +507,7 @@
   hand)
 
 ;;; ------------------------------------------------------------------
-;;; Harvest — build item records from the selection
+;;; Harvest - build item records from the selection
 ;;; item record: assoc list with string keys:
 ;;;  "KIND" "DOOR"|"WINDOW"  "MARK" "5"/"A"/""  "CODE" "2668"/""
 ;;;  "MULT" int  "WIN"/"HIN" real|nil  "HAND" "LH"|"RH"|nil
@@ -672,7 +678,7 @@
 ;; main harvest: user picks two corners; returns list of records
 (defun sch:harvest ( / p1 p2 ss i e v on walls recs inserts kind cased
                        isxref bd)
-  (setq p1 (getpoint "\nSchedule area — first corner of plan region: "))
+  (setq p1 (getpoint "\nSchedule area - first corner of plan region: "))
   (if p1 (setq p2 (getcorner p1 "\nOpposite corner: ")))
   (if (and p1 p2)
     (progn
@@ -798,14 +804,14 @@
     (setvar "ERRNO" 0)
     (setq es (entsel prompt))
     (cond
-      ((and (null es) (= (getvar "ERRNO") 7)) ; missed pick — re-prompt
-       (princ "\n[SCH] Nothing there — pick the table or press Enter to skip."))
+      ((and (null es) (= (getvar "ERRNO") 7)) ; missed pick - re-prompt
+       (princ "\n[SCH] Nothing there - pick the table or press Enter to skip."))
       ((null es) (setq done T out nil)) ; genuine Enter = skip
       (t
        (setq v (sch:vla (car es)))
        (if (= (sch:objname v) "AcDbTable")
          (setq done T out v)
-         (princ "\n[SCH] That is not a table — pick the schedule table or press Enter to cancel.")))))
+         (princ "\n[SCH] That is not a table - pick the schedule table or press Enter to cancel.")))))
   out)
 
 ;; returns (title headerRowIdx colmap rows cols marks)
@@ -903,7 +909,7 @@
   (setq marks (nth 5 info))
   (foreach m marks
     (if (/= (car m) "") (setq used (cons (car m) used))))
-  ;; marks already carried by harvested aggs are taken too — a freshly
+  ;; marks already carried by harvested aggs are taken too - a freshly
   ;; assigned mark must not collide with a tagged opening in this run
   (foreach a aggs
     (if (/= (car a) "") (setq used (cons (car a) used))))
@@ -1051,7 +1057,7 @@
       (action_tile "cancel" "(done_dialog 0)")
       (setq ok (= (start_dialog) 1)))
     (progn
-      ;; DCL failed — fall back to command-line preview + confirm
+      ;; DCL failed - fall back to command-line preview + confirm
       (princ "\n--- SCH preview (dialog unavailable) ---")
       (princ "\nWINDOW SCHEDULE:")
       (foreach p wplan
@@ -1091,7 +1097,7 @@
   info)
 
 ;; append a new data row at the bottom; returns new row index or nil.
-;; InsertRows is a void method — success is verified by the row count
+;; InsertRows is a void method - success is verified by the row count
 ;; actually growing, never by the (always-nil) return value.
 (defun sch:append-row (tbl info / rows h newrows)
   (setq rows (nth 3 info))
@@ -1155,7 +1161,7 @@
   written)
 
 ;;; ------------------------------------------------------------------
-;;; c:SCH — main command
+;;; c:SCH - main command
 ;;; ------------------------------------------------------------------
 
 (defun c:SCH ( / doc recs waggs daggs wtbl dtbl winfo dinfo wplan dplan
@@ -1194,7 +1200,7 @@
      (setq dtbl (sch:pick-table
                   "\nSelect the DOOR SCHEDULE table (Enter to skip): "))
      (if (and (null wtbl) (null dtbl))
-       (princ "\n[SCH] No tables selected — cancelled.")
+       (princ "\n[SCH] No tables selected - cancelled.")
        (progn
          (if wtbl (setq winfo (sch:table-info wtbl)))
          (if dtbl (setq dinfo (sch:table-info dtbl)))
@@ -1208,10 +1214,10 @@
                                      (car dinfo) "\"")
                              notes)))
          (if (and winfo (null (cadr winfo)))
-           (progn (setq notes (cons "Window table: no MARK header row found — skipped." notes))
+           (progn (setq notes (cons "Window table: no MARK header row found - skipped." notes))
                   (setq wtbl nil winfo nil)))
          (if (and dinfo (null (cadr dinfo)))
-           (progn (setq notes (cons "Door table: no MARK header row found — skipped." notes))
+           (progn (setq notes (cons "Door table: no MARK header row found - skipped." notes))
                   (setq dtbl nil dinfo nil)))
          (if winfo (setq wplan (sch:merge wtbl winfo waggs "WINDOW")))
          (if dinfo (setq dplan (sch:merge dtbl dinfo daggs "DOOR")))
@@ -1236,19 +1242,26 @@
                (setq n (+ n (sch:apply-plan wtbl winfo wplan "WINDOW"))))
              (if (and dtbl dplan)
                (setq n (+ n (sch:apply-plan dtbl dinfo dplan "DOOR"))))
-             (princ (strcat "\n[SCH] Done — " (itoa n) " rows written.")))
-           (princ "\n[SCH] Cancelled — tables unchanged."))))))
+             (princ (strcat "\n[SCH] Done - " (itoa n) " rows written.")))
+           (princ "\n[SCH] Cancelled - tables unchanged."))))))
   (sch:catch 'vla-EndUndoMark (list doc))
   (setvar "CMDECHO" oldecho)
   (princ))
 
 ;;; ------------------------------------------------------------------
-;;; c:SCHDIAG — diagnostics
+;;; c:SCHDIAG - diagnostics
 ;;; ------------------------------------------------------------------
 
-(defun sch:diag-out (f msg)
+;; f kept for signature compatibility but IGNORED: every line is
+;; opened/appended/closed individually so the report file survives an
+;; AutoCAD crash - the last line on disk shows the step that killed it.
+(defun sch:diag-out (f msg / fh)
   (princ (strcat "\n" msg))
-  (if f (write-line msg f)))
+  (if *sch:diag-path*
+    (progn
+      (setq fh (open *sch:diag-path* "a"))
+      (if fh (progn (write-line msg fh) (close fh)))))
+  (princ))
 
 (defun sch:diag-count (f label filt / ss)
   (setq ss (ssget "_X" filt))
@@ -1294,7 +1307,7 @@
     (sch:diag-out f
       (if (sch:sched-app)
         "    (no property sets returned for this object)"
-        "    (AecX.AecScheduleApplication NOT available — property sets unreadable)"))))
+        "    (AecX.AecScheduleApplication NOT available - property sets unreadable)"))))
 
 (defun sch:diag-xdict (f ename / ed xd pair)
   (setq ed (entget ename))
@@ -1312,42 +1325,59 @@
           (sch:diag-out f (strcat "      key: " (cdr g)))))))
   (princ))
 
-(defun c:SCHDIAG ( / f path es v on ename walls hand prims done ss i tbl
-                     info oldecho *error*)
+(defun c:SCHDIAG ( / fh es v on ename walls hand prims done ss i tbl
+                     info oldecho kw *error*)
   (defun *error* (msg)
-    (if f (close f))
     (if oldecho (setvar "CMDECHO" oldecho))
     (if (and msg (not (wcmatch (strcase msg) "*BREAK*,*CANCEL*,*EXIT*")))
       (princ (strcat "\n[SCHDIAG] Error: " msg)))
     (princ))
   (setq oldecho (getvar "CMDECHO"))
   (setvar "CMDECHO" 0)
-  (setq path (strcat (getvar "DWGPREFIX") "SCHDIAG-report.txt"))
-  (setq f (open path "a"))
-  (if (null f)
+  ;; report path: next to the DWG, else temp folder
+  (setq *sch:diag-path* (strcat (getvar "DWGPREFIX") "SCHDIAG-report.txt"))
+  (setq fh (open *sch:diag-path* "a"))
+  (if fh
+    (close fh)
+    (setq *sch:diag-path*
+      (strcat (getvar "TEMPPREFIX") "SCHDIAG-report.txt")))
+  ;; opt-in gates for the two crash-prone subsystems
+  (initget "Yes No")
+  (setq kw (getkword
+    "\nTest AecX property-set interface (COM)? [Yes/No] <Yes>: "))
+  (setq *sch:use-aecx* (/= kw "No"))
+  (initget "Yes No")
+  (setq kw (getkword
+    "\nTest door explode / swing detection? [Yes/No] <Yes>: "))
+  (setq *sch:use-explode* (/= kw "No"))
+  (sch:diag-out nil "==========================================================")
+  (sch:diag-out nil (strcat "SCHDIAG v1.2  dwg: " (getvar "DWGNAME")
+                            "  date: " (rtos (getvar "CDATE") 2 6)))
+  (sch:diag-out nil (strcat "  product: " (getvar "ACADVER")
+                            "  aecx-gate: " (if *sch:use-aecx* "ON" "OFF")
+                            "  explode-gate: "
+                            (if *sch:use-explode* "ON" "OFF")))
+  (sch:diag-out nil "STEP: census of AEC objects (ssget)...")
+  (sch:diag-count nil "AEC doors" '((0 . "AEC_DOOR")))
+  (sch:diag-count nil "AEC windows" '((0 . "AEC_WINDOW")))
+  (sch:diag-count nil "AEC window assemblies" '((0 . "AEC_WINDOW_ASSEMBLY")))
+  (sch:diag-count nil "AEC openings" '((0 . "AEC_OPENING")))
+  (sch:diag-count nil "AEC walls" '((0 . "AEC_WALL")))
+  (sch:diag-count nil "AEC mvblock refs (tags)" '((0 . "AEC_MVBLOCK_REF")))
+  (sch:diag-count nil "TK_ tag INSERTs" '((0 . "INSERT") (2 . "TK_*")))
+  (sch:diag-count nil "ACAD tables" '((0 . "ACAD_TABLE")))
+  (if *sch:use-aecx*
     (progn
-      (setq path (strcat (getvar "TEMPPREFIX") "SCHDIAG-report.txt"))
-      (setq f (open path "a"))))
-  (sch:diag-out f "==========================================================")
-  (sch:diag-out f (strcat "SCHDIAG  dwg: " (getvar "DWGNAME")
-                          "  date: " (rtos (getvar "CDATE") 2 6)))
-  (sch:diag-out f (strcat "  product: " (getvar "ACADVER")
-                          "  |  AecX schedule app: "
-                          (if (sch:sched-app)
-                            (strcat "OK (\"AecX.AecScheduleApplication"
-                                    (if *sch:schedapp-ver* *sch:schedapp-ver* "")
-                                    "\")")
-                            "NOT AVAILABLE")))
-  (sch:diag-out f "-- census (entire drawing) --")
-  (sch:diag-count f "AEC doors" '((0 . "AEC_DOOR")))
-  (sch:diag-count f "AEC windows" '((0 . "AEC_WINDOW")))
-  (sch:diag-count f "AEC window assemblies" '((0 . "AEC_WINDOW_ASSEMBLY")))
-  (sch:diag-count f "AEC openings" '((0 . "AEC_OPENING")))
-  (sch:diag-count f "AEC walls" '((0 . "AEC_WALL")))
-  (sch:diag-count f "AEC mvblock refs (tags)" '((0 . "AEC_MVBLOCK_REF")))
-  (sch:diag-count f "TK_ tag INSERTs" '((0 . "INSERT") (2 . "TK_*")))
-  (sch:diag-count f "ACAD tables" '((0 . "ACAD_TABLE")))
-  ;; table titles
+      (sch:diag-out nil
+        "STEP: probing AecX.AecScheduleApplication (if AutoCAD dies HERE, rerun and answer No to the AecX question)...")
+      (sch:diag-out nil
+        (strcat "  AecX schedule app: "
+                (if (sch:sched-app)
+                  (strcat "OK (AecX.AecScheduleApplication"
+                          (if *sch:schedapp-ver* *sch:schedapp-ver* "")
+                          ")")
+                  "NOT AVAILABLE")))))
+  (sch:diag-out nil "STEP: reading ACAD table titles...")
   (setq ss (ssget "_X" '((0 . "ACAD_TABLE"))))
   (if ss
     (progn
@@ -1355,7 +1385,7 @@
       (while (< i (sslength ss))
         (setq tbl (sch:vla (ssname ss i))
               info (sch:table-info tbl))
-        (sch:diag-out f
+        (sch:diag-out nil
           (strcat "  table " (itoa (1+ i)) ": \"" (car info) "\"  rows="
                   (itoa (nth 3 info)) " cols=" (itoa (nth 4 info))
                   (if (cadr info)
@@ -1363,45 +1393,53 @@
                     "  (no MARK header)")))
         (setq i (1+ i)))))
   ;; per-entity inspection loop
-  (sch:diag-out f "-- entity inspection (pick doors, windows, openings, walls, tags; Enter to finish) --")
+  (sch:diag-out nil "-- entity inspection (pick doors, windows, openings, walls, tags; Enter to finish) --")
   (setq done nil)
   (while (not done)
-    (setq es (entsel "\nSCHDIAG — select an entity to inspect (Enter to finish): "))
+    (setq es (entsel "\nSCHDIAG - select an entity to inspect (Enter to finish): "))
     (if (null es)
       (setq done T)
       (progn
         (setq ename (car es) v (sch:vla ename) on (sch:objname v))
-        (sch:diag-out f (strcat "  ENTITY " on
-                                "  layer=" (sch:val->str (sch:prop v 'Layer))
-                                "  handle=" (sch:val->str (sch:prop v 'Handle))))
-        (sch:diag-out f (strcat "    dxf type: "
-                                (cdr (assoc 0 (entget ename)))))
-        (sch:diag-props f v)
-        (sch:diag-psets f v)
-        (sch:diag-xdict f ename)
-        ;; door-specific: explode test + hand
-        (if (wcmatch on "AecDbDoor,AecDbOpening")
+        (sch:diag-out nil (strcat "  ENTITY " on
+                                  "  layer=" (sch:val->str (sch:prop v 'Layer))
+                                  "  handle=" (sch:val->str (sch:prop v 'Handle))))
+        (sch:diag-out nil (strcat "    dxf type: "
+                                  (cdr (assoc 0 (entget ename)))))
+        (sch:diag-out nil "STEP: ActiveX property probe...")
+        (sch:diag-props nil v)
+        (if *sch:use-aecx*
           (progn
-            (sch:diag-out f "    explode test:")
+            (sch:diag-out nil
+              "STEP: property sets via AecX (if AutoCAD dies HERE, rerun with AecX = No)...")
+            (sch:diag-psets nil v)))
+        (sch:diag-out nil "STEP: extension dictionary...")
+        (sch:diag-xdict nil ename)
+        ;; door-specific: explode test + hand
+        (if (and *sch:use-explode* (wcmatch on "AecDbDoor,AecDbOpening"))
+          (progn
+            (sch:diag-out nil
+              "STEP: explode/swing test (if AutoCAD dies HERE, rerun with explode = No)...")
             (setq prims (sch:explode-copy v))
             (if prims
               (progn
                 (foreach o prims
-                  (sch:diag-out f (strcat "      -> " (sch:objname o))))
+                  (sch:diag-out nil (strcat "      -> " (sch:objname o))))
                 (sch:del-ents prims))
-              (sch:diag-out f "      (explode produced nothing / failed)"))
+              (sch:diag-out nil "      (explode produced nothing / failed)"))
             (if (null walls) (setq walls (sch:collect-walls)))
             (setq hand (sch:door-hand v walls))
-            (sch:diag-out f (strcat "    computed hand: "
-                                    (if hand hand "UNKNOWN")))))
+            (sch:diag-out nil (strcat "    computed hand: "
+                                      (if hand hand "UNKNOWN")))))
         (if (= on "AecDbWall")
-          (sch:diag-out f
-            (strcat "    wall record: "
-                    (vl-princ-to-string (sch:wall-record v))))))))
-  (sch:diag-out f (strcat "-- end of SCHDIAG run --"))
-  (if f (close f))
+          (progn
+            (sch:diag-out nil "STEP: wall record...")
+            (sch:diag-out nil
+              (strcat "    wall record: "
+                      (vl-princ-to-string (sch:wall-record v)))))))))
+  (sch:diag-out nil "-- end of SCHDIAG run (completed normally) --")
   (setvar "CMDECHO" oldecho)
-  (princ (strcat "\n[SCHDIAG] Report appended to: " path))
+  (princ (strcat "\n[SCHDIAG] Report at: " *sch:diag-path*))
   (princ))
 
 ;;; ------------------------------------------------------------------
