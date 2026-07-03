@@ -158,7 +158,8 @@
 ;; Parse a DSLD size code -> (mult widthIn heightIn) or nil.
 ;; "2668" -> (1 30.0 80.0)   "8080" -> (1 96.0 96.0)
 ;; "16070" -> (1 192.0 84.0) "2-2668"/"DBL. 2668" -> (2 30.0 80.0)
-(defun sch:parse-size (raw / s mult d1 d2 d3 d4 d5 n)
+;; "8X7"/"16X7" garage and "3X4"/"4X5" window shorthand (feet x feet)
+(defun sch:parse-size (raw / s mult d1 d2 d3 d4 d5 n p)
   (setq s (strcase (sch:trim raw)) mult 1)
   (cond ((wcmatch s "DBL*")
          (setq mult 2 s (sch:trim (vl-string-trim ". " (substr s 4))))))
@@ -167,6 +168,10 @@
            (setq s (substr s 3))))
   (setq n (strlen s))
   (cond
+    ((wcmatch s "#X#,##X#,#X##,##X##") ; feet x feet: 8X7, 16X7, 3X4
+     (setq p (vl-string-search "X" s))
+     (list mult (* 12.0 (atoi (substr s 1 p)))
+           (* 12.0 (atoi (substr s (+ p 2))))))
     ((not (sch:alldigits-p s)) nil)
     ((= n 4)
      (setq d1 (atoi (substr s 1 1)) d2 (atoi (substr s 2 1))
@@ -614,7 +619,8 @@
 ;; walk made huge xrefs unusably slow), transform candidate points to
 ;; world, keep those inside box p1-p2.
 (defun sch:harvest-xref (vlaIns p1 p2 walls / bname bdef e ed dxf nm ip
-                          rot sx sy out c wpt kind cased inserts v)
+                          rot sx sy out c wpt kind cased inserts v
+                          cnt nd nw)
   (setq bname (sch:val->str (sch:prop vlaIns 'Name)))
   (setq ip (sch:catch 'vlax-safearray->list
              (list (vlax-variant-value (vla-get-InsertionPoint vlaIns))))
@@ -626,8 +632,10 @@
   (if (null sy) (setq sy 1.0))
   (setq bdef (tblsearch "BLOCK" bname))
   (setq e (if bdef (cdr (assoc -2 bdef))))
+  (setq cnt 0 nd 0 nw 0)
   (while e
-    (setq ed (entget e)
+    (setq cnt (1+ cnt)
+          ed (entget e)
           dxf (cdr (assoc 0 ed))
           kind nil cased nil)
     (cond
@@ -645,8 +653,10 @@
            (if (sch:pt-in-box wpt p1 p2)
              ;; note: hand detection skipped for xref-resident
              ;; doors (cannot safely explode inside an xref)
-             (setq out (cons (sch:harvest-aec v kind cased walls nil)
-                             out))))))
+             (progn
+               (if (= kind "DOOR") (setq nd (1+ nd)) (setq nw (1+ nw)))
+               (setq out (cons (sch:harvest-aec v kind cased walls nil)
+                               out)))))))
       ((and (= dxf "INSERT")
             (setq nm (cdr (assoc 2 ed)))
             (wcmatch (strcase nm) "TK_DOOR_TAG*,TK_WINDOW_TAG*"))
@@ -657,6 +667,13 @@
            (if (sch:pt-in-box wpt p1 p2)
              (setq inserts (cons (cons (sch:vla e) wpt) inserts)))))))
     (setq e (entnext e)))
+  ;; per-xref readout: shows whether the xref could be scanned at all
+  (princ (strcat "\n[SCH]   xref \"" bname "\": " (itoa cnt)
+                 " entities scanned, " (itoa nd) " doors / " (itoa nw)
+                 " windows inside the region."))
+  (if (= cnt 0)
+    (princ (strcat "\n[SCH]   (xref \"" bname
+                   "\" not walkable - probably demand-loaded. Open that construct and run SCH inside it, or set XLOADCTL to 0 and reload.)")))
   ;; same rule as the top-level harvest: tag records only for kinds
   ;; with no AEC objects found (avoids double-counting tagged doors)
   (if inserts
@@ -760,12 +777,26 @@
 ;;; agg row: (mark widthIn heightIn qty lh rh cased wallcls codes notes)
 ;;; ------------------------------------------------------------------
 
-(defun sch:agg-key (r)
+;; grouping key: mark when readable; otherwise size code, else the
+;; measured WxH plus style name - so unmarked doors of different sizes
+;; and styles land on separate schedule rows instead of one big group.
+(defun sch:agg-key (r / sz)
   (strcat (sch:rget r "KIND") "|"
           (if (/= (sch:rget r "MARK") "") (sch:rget r "MARK")
-            (strcat "?" (sch:rget r "CODE") "|"
-                    (if (sch:rget r "CASED") "C" "")
-                    (if (sch:rget r "WALL") (sch:rget r "WALL") "")))))
+            (progn
+              (setq sz
+                (if (/= (sch:rget r "CODE") "") (sch:rget r "CODE")
+                  (strcat
+                    (if (sch:rget r "WIN")
+                      (rtos (sch:rget r "WIN") 2 1) "?")
+                    "x"
+                    (if (sch:rget r "HIN")
+                      (rtos (sch:rget r "HIN") 2 1) "?"))))
+              (strcat "?" sz "|"
+                      (if (sch:rget r "STYLE") (sch:rget r "STYLE") "")
+                      "|"
+                      (if (sch:rget r "CASED") "C" "")
+                      (if (sch:rget r "WALL") (sch:rget r "WALL") ""))))))
 
 (defun sch:aggregate (recs kind / groups key g out mark win hin qty lh rh
                         cased wall code notes)
@@ -1355,6 +1386,10 @@
            (if (and (nth 9 p) (/= (nth 9 p) ""))
              (setq notes (cons (strcat "Mark " (cadr p) ": " (nth 9 p))
                                notes))))
+         (if (vl-some '(lambda (r) (= (sch:rget r "MARK") "")) recs)
+           (setq notes
+             (cons "Some openings have no readable mark - rows grouped by size/style, marks auto-assigned."
+                   notes)))
          (foreach r recs
            (if (and (= (sch:rget r "SRC") "tag")
                     (= (sch:rget r "CODE") ""))
@@ -1439,20 +1474,49 @@
         "    (no property sets returned for this object)"
         "    (AecX.AecScheduleApplication NOT available - property sets unreadable)"))))
 
-(defun sch:diag-xdict (f ename / ed xd pair)
-  (setq ed (entget ename))
-  (setq xd (cdr (assoc 360 ed)))
-  (if xd
+;; dump one entity's entget (capped) - used for property-set objects
+(defun sch:diag-dumpent (f ename indent / ed i)
+  (setq ed (sch:catch 'entget (list ename)) i 0)
+  (foreach g ed
+    (if (< i 60)
+      (sch:diag-out f (strcat indent (vl-princ-to-string g))))
+    (setq i (1+ i)))
+  (if (>= i 60) (sch:diag-out f (strcat indent "...(truncated)")))
+  (princ))
+
+;; walk the extension dictionary two levels deep - this is where ACA
+;; property sets live (AEC_PROPERTY_SETS dictionary), and the raw
+;; entget of those objects shows how to read DSLD_NUMBER etc. without
+;; the AecX COM interface.
+(defun sch:diag-xdict (f ename / ed xd name name2 sub subed g g2)
+  (setq ed (entget ename)
+        xd (cdr (assoc 360 ed)))
+  (if (null xd)
+    (sch:diag-out f "    (no extension dictionary)")
     (progn
       (sch:diag-out f "    extension dictionary entries:")
-      (setq pair (dictnext xd T))
-      (while pair
-        (sch:diag-out f (strcat "      " (cdr (assoc 3 (entget xd)))))
-        (setq pair nil)) ; names come from owner dict; keep it simple:
-      (setq pair (entget xd))
-      (foreach g pair
-        (if (= (car g) 3)
-          (sch:diag-out f (strcat "      key: " (cdr g)))))))
+      (foreach g (entget xd)
+        (cond
+          ((= (car g) 3) (setq name (cdr g)))
+          ((member (car g) '(350 360 340))
+           (setq sub (cdr g)
+                 subed (sch:catch 'entget (list sub)))
+           (sch:diag-out f (strcat "      [" (if name name "?")
+                                   "] type="
+                                   (if subed (cdr (assoc 0 subed)) "?")))
+           (if (and subed (= (cdr (assoc 0 subed)) "DICTIONARY"))
+             (progn
+               (setq name2 nil)
+               (foreach g2 subed
+                 (cond
+                   ((= (car g2) 3) (setq name2 (cdr g2)))
+                   ((member (car g2) '(350 360 340))
+                    (sch:diag-out f (strcat "        {"
+                                            (if name2 name2 "?") "}"))
+                    (sch:diag-dumpent f (cdr g2) "          ")))))
+             (if (and subed
+                      (wcmatch (strcase (if name name "")) "*PROP*,*AEC*"))
+               (sch:diag-dumpent f sub "        "))))))))
   (princ))
 
 (defun c:SCHDIAG ( / fh es v on ename walls hand prims done ss i tbl

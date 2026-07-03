@@ -60,6 +60,10 @@
   (tst:assert "parse 00 -> nil" (sch:parse-size "00") nil)
   (tst:assert "parse TWIN text -> nil" (sch:parse-size "TWIN 3'-0\"") nil)
   (tst:assert "parse empty -> nil" (sch:parse-size "") nil)
+  (tst:assert "parse 8x7 garage" (sch:parse-size "8x7") (list 1 96.0 84.0))
+  (tst:assert "parse 16x7 garage" (sch:parse-size "16x7")
+              (list 1 192.0 84.0))
+  (tst:assert "parse 3x4 window" (sch:parse-size "3x4") (list 1 36.0 48.0))
   ;; --- feet-inch formatter ---
   (tst:assert "ftin 30" (sch:ftin 30.0) "2'-6\"")
   (tst:assert "ftin 96" (sch:ftin 96.0) "8'-0\"")
