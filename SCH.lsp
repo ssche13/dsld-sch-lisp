@@ -876,6 +876,37 @@
     (strcat "CASED OPENING - " wall "\" WALL")
     "CASED OPENING"))
 
+;; first "spare" data row mark: mark pre-filled (like the window
+;; table's F/G/H rows) but QTY and WIDTH cells empty; skips marks
+;; already taken this run. Returns the mark string or nil.
+(defun sch:spare-mark (tbl info taken / out m r)
+  (foreach m (nth 5 info)
+    (if (and (null out) (/= (car m) "")
+             (not (member (car m) taken)))
+      (progn
+        (setq r (cdr m))
+        (if (and (= (sch:strip-fmt
+                      (sch:tbl-get tbl r (sch:col info "QTY"))) "")
+                 (= (sch:strip-fmt
+                      (sch:tbl-get tbl r (sch:col info "WIDTH"))) ""))
+          (setq out (car m))))))
+  out)
+
+;; first completely blank data row (no mark, no qty, no width),
+;; excluding row indices in skip. Returns row index or nil.
+(defun sch:blank-row (tbl info skip / out m r)
+  (foreach m (nth 5 info)
+    (if (and (null out) (= (car m) "")
+             (not (member (cdr m) skip)))
+      (progn
+        (setq r (cdr m))
+        (if (and (= (sch:strip-fmt
+                      (sch:tbl-get tbl r (sch:col info "QTY"))) "")
+                 (= (sch:strip-fmt
+                      (sch:tbl-get tbl r (sch:col info "WIDTH"))) ""))
+          (setq out r)))))
+  out)
+
 ;; find an existing row for an agg row.
 ;; priority: same mark; else (cased rows) row whose desc contains CASED
 ;; with same W/H; else same W/H unique.
@@ -905,7 +936,7 @@
 ;; kind "WINDOW"|"DOOR"; aggs = sch:aggregate output.
 (defun sch:merge (tbl info aggs kind / plan used marks hit rowidx mark wtxt
                     htxt qty lh rh desc flag curw curh curq curd r
-                    sorted)
+                    sorted sparetaken)
   (setq marks (nth 5 info))
   (foreach m marks
     (if (/= (car m) "") (setq used (cons (car m) used))))
@@ -916,13 +947,18 @@
   ;; assign marks to unmarked aggs
   (setq aggs
     (mapcar
-      '(lambda (a / hit2 mk)
+      '(lambda (a / hit2 mk sp)
          (if (= (car a) "")
            (progn
              (setq hit2 (sch:find-row a tbl info))
-             (setq mk (cond (hit2 (car hit2))
-                            ((= kind "DOOR") (sch:next-num-mark used))
-                            (t (sch:next-alpha-mark used))))
+             (setq mk (cond
+                        (hit2 (car hit2))
+                        ;; pre-filled spare rows (F/G/H style) first
+                        ((setq sp (sch:spare-mark tbl info sparetaken))
+                         (setq sparetaken (cons sp sparetaken))
+                         sp)
+                        ((= kind "DOOR") (sch:next-num-mark used))
+                        (t (sch:next-alpha-mark used))))
              (setq used (cons mk used))
              (cons mk (cdr a)))
            a))
@@ -1119,7 +1155,7 @@
     s))
 
 (defun sch:apply-plan (tbl info plan kind / r p rowidx desc lhc rhc
-                         written handcols)
+                         written handcols newrows)
   (setq written 0)
   (setq handcols (and (= kind "DOOR") (= *sch:handmode* "cols")))
   (if handcols (setq info (sch:ensure-hand-cols tbl info)))
@@ -1128,8 +1164,13 @@
       (progn
         (setq rowidx (car p))
         (if (null rowidx)
-          (setq rowidx (sch:append-row tbl info)
-                info (if rowidx (sch:table-info tbl) info)))
+          (progn
+            ;; consume a blank spare row first, only then grow the table
+            (setq rowidx (sch:blank-row tbl info newrows))
+            (if (null rowidx)
+              (setq rowidx (sch:append-row tbl info)
+                    info (if rowidx (sch:table-info tbl) info)))
+            (if rowidx (setq newrows (cons rowidx newrows)))))
         (if rowidx
           (progn
             (sch:tbl-set tbl rowidx (sch:col info "MARK") (cadr p))

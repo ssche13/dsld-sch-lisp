@@ -129,6 +129,27 @@
 ;;; Integration tests (drawing with TK_ tags + window schedule table)
 ;;; ------------------------------------------------------------------
 
+;; find the first ACAD_TABLE whose title matches pat -> (tbl info) or nil
+(defun tst:find-table (pat / ss i tbl info out)
+  (setq ss (ssget "_X" '((0 . "ACAD_TABLE"))))
+  (if ss
+    (progn
+      (setq i 0)
+      (while (and (< i (sslength ss)) (null out))
+        (setq tbl (sch:vla (ssname ss i))
+              info (sch:table-info tbl))
+        (if (wcmatch (strcase (car info)) pat)
+          (setq out (list tbl info)))
+        (setq i (1+ i)))))
+  out)
+
+;; build a synthetic harvest record (same shape as sch:harvest-aec)
+(defun tst:make-rec (kind mark code mult win hin hand cased wall)
+  (list (cons "KIND" kind) (cons "MARK" mark) (cons "CODE" code)
+        (cons "MULT" mult) (cons "WIN" win) (cons "HIN" hin)
+        (cons "HAND" hand) (cons "CASED" cased) (cons "WALL" wall)
+        (cons "STYLE" "") (cons "SRC" "test")))
+
 (defun tst:dump-table (tbl info label / r c row rows cols)
   (setq rows (nth 3 info) cols (nth 4 info) r 0)
   (tst:out (strcat "  -- table dump " label " ("
@@ -143,7 +164,8 @@
   (princ))
 
 (defun tst:integration ( / ss i v ins recs aggs a tbl info plan pE
-                           written rowE)
+                           written rowE pair recs2 aggs2 plan2 p2
+                           info2w rF)
   ;; harvest all TK_ tag inserts in model space
   (setq ss (ssget "_X" '((0 . "INSERT") (2 . "TK_*") (410 . "Model"))))
   (if (null ss)
@@ -176,12 +198,12 @@
       (tst:assert "agg width in" (cadr a) 24.0)
       (tst:assert "agg height in" (caddr a) 48.0)
       ;; table
-      (setq ss (ssget "_X" '((0 . "ACAD_TABLE"))))
-      (if (null ss)
-        (tst:out "  SKIP table tests: no ACAD_TABLE in this drawing")
+      (setq pair (tst:find-table "*WINDOW*"))
+      (if (null pair)
+        (tst:out "  SKIP table tests: no WINDOW SCHEDULE table in this drawing")
         (progn
-          (setq tbl (sch:vla (ssname ss 0))
-                info (sch:table-info tbl))
+          (setq tbl (car pair)
+                info (cadr pair))
           (tst:out (strcat "  table title: \"" (car info) "\""))
           (tst:assert "title contains WINDOW"
                       (if (wcmatch (strcase (car info)) "*WINDOW*") T nil) T)
@@ -234,7 +256,157 @@
                             (sch:tbl-get tbl rowE
                                          (sch:col info "DESCRIPTION")))
                           "6 LITE FIXED")))
-          (tst:dump-table tbl info "AFTER")))))
+          (tst:dump-table tbl info "AFTER")
+          ;; second pass: a brand-new window size must adopt the first
+          ;; pre-filled spare mark (F) instead of inventing a new one
+          (setq info (sch:table-info tbl))
+          (setq recs2 (list (tst:make-rec "WINDOW" "" "3050" 1
+                                          36.0 60.0 nil nil nil)))
+          (setq aggs2 (sch:aggregate recs2 "WINDOW"))
+          (setq plan2 (sch:merge tbl info aggs2 "WINDOW"))
+          (tst:out (strcat "  spare plan: " (vl-princ-to-string plan2)))
+          (setq p2 (car plan2))
+          (tst:assert "new window adopts spare mark F" (cadr p2) "F")
+          (sch:apply-plan tbl info plan2 "WINDOW")
+          (setq info2w (sch:table-info tbl))
+          (tst:assert "window table did not grow"
+                      (nth 3 info2w) (nth 3 info))
+          (setq rF (cdr (assoc "F" (nth 5 info2w))))
+          (tst:assert "row F present" (if rF T nil) T)
+          (if rF
+            (progn
+              (tst:assert "row F WIDTH"
+                          (sch:strip-fmt
+                            (sch:tbl-get tbl rF (sch:col info2w "WIDTH")))
+                          "3'-0\"")
+              (tst:assert "row F HEIGHT"
+                          (sch:strip-fmt
+                            (sch:tbl-get tbl rF (sch:col info2w "HEIGHT")))
+                          "5'-0\"")
+              (tst:assert "row F QTY"
+                          (sch:strip-fmt
+                            (sch:tbl-get tbl rF (sch:col info2w "QTY")))
+                          "1")))
+          (tst:dump-table tbl info2w "AFTER SPARE ADOPTION")))))
+  (princ))
+
+;; Door-table integration: uses SYNTHETIC records (no doors needed in
+;; the drawing) against a real DOOR SCHEDULE table. Exercises LH/RH
+;; column insertion, hand-count cells, cased-opening desc updates,
+;; and appending a brand-new row.
+(defun tst:integration-door ( / pair tbl info recs aggs plan written
+                                info2 r5 r10 rNew rowsBefore had3080
+                                hadblank m r wtxt htxt)
+  (setq pair (tst:find-table "*DOOR*"))
+  (if (null pair)
+    (tst:out "  SKIP door tests: no DOOR SCHEDULE table in this drawing")
+    (progn
+      (setq tbl (car pair) info (cadr pair)
+            rowsBefore (nth 3 info))
+      (tst:dump-table tbl info "DOOR BEFORE")
+      ;; note pre-existing 3'-0"x8'-0" rows and blank spare rows
+      ;; (both affect the new-row expectations below)
+      (setq had3080 nil hadblank nil)
+      (foreach m (nth 5 info)
+        (setq wtxt (sch:strip-fmt (sch:tbl-get tbl (cdr m)
+                                               (sch:col info "WIDTH")))
+              htxt (sch:strip-fmt (sch:tbl-get tbl (cdr m)
+                                               (sch:col info "HEIGHT"))))
+        (if (and (= wtxt "3'-0\"") (= htxt "8'-0\"")) (setq had3080 T))
+        (if (and (= (car m) "") (= wtxt "")) (setq hadblank T)))
+      (if had3080 (tst:out "  note: table already has a 3'-0\"x8'-0\" row"))
+      (if hadblank (tst:out "  note: table has blank spare rows"))
+      ;; synthetic harvest:
+      ;;  5x mark 5 hinged 2'-8"x6'-8" (3 LH / 2 RH)
+      ;;  1x cased opening 2'-8"x6'-8" in a 6" wall (no mark)
+      ;;  1x new door 3'-0"x8'-0" LH (no mark, size not in table)
+      (setq recs nil)
+      (repeat 3 (setq recs (cons (tst:make-rec "DOOR" "5" "2868" 1
+                                               32.0 80.0 "LH" nil nil)
+                                 recs)))
+      (repeat 2 (setq recs (cons (tst:make-rec "DOOR" "5" "2868" 1
+                                               32.0 80.0 "RH" nil nil)
+                                 recs)))
+      (setq recs (cons (tst:make-rec "DOOR" "" "" 1 32.0 80.0
+                                     nil T "6")
+                       recs))
+      (setq recs (cons (tst:make-rec "DOOR" "" "3080" 1 36.0 96.0
+                                     "LH" nil nil)
+                       recs))
+      (setq aggs (sch:aggregate recs "DOOR"))
+      (tst:assert "door agg rows" (length aggs) 3)
+      (setq plan (sch:merge tbl info aggs "DOOR"))
+      (tst:out (strcat "  door plan: " (vl-princ-to-string plan)))
+      (setq *sch:handmode* "cols")
+      (setq written (sch:apply-plan tbl info plan "DOOR"))
+      (tst:out (strcat "  door rows written: " (itoa written)))
+      (tst:assert "three rows written" written 3)
+      (setq info2 (sch:table-info tbl))
+      ;; LH/RH columns inserted after QTY
+      (tst:assert "LH column inserted" (if (sch:col info2 "LH") T nil) T)
+      (tst:assert "RH column inserted" (if (sch:col info2 "RH") T nil) T)
+      (if (and (sch:col info2 "QTY") (sch:col info2 "LH"))
+        (tst:assert "LH sits right after QTY"
+                    (sch:col info2 "LH") (1+ (sch:col info2 "QTY"))))
+      ;; mark 5: qty 5, 3 LH / 2 RH, description preserved
+      (setq r5 (cdr (assoc "5" (nth 5 info2))))
+      (tst:assert "door row 5 present" (if r5 T nil) T)
+      (if r5
+        (progn
+          (tst:assert "door 5 QTY"
+                      (sch:strip-fmt (sch:tbl-get tbl r5
+                                                  (sch:col info2 "QTY")))
+                      "5")
+          (tst:assert "door 5 LH"
+                      (sch:strip-fmt (sch:tbl-get tbl r5
+                                                  (sch:col info2 "LH")))
+                      "3")
+          (tst:assert "door 5 RH"
+                      (sch:strip-fmt (sch:tbl-get tbl r5
+                                                  (sch:col info2 "RH")))
+                      "2")))
+      ;; cased opening matched an existing CASED row by size and got
+      ;; the wall size appended to the description
+      (setq r10 nil)
+      (foreach m (nth 5 info2)
+        (setq r (cdr m))
+        (if (and (null r10)
+                 (wcmatch (strcase (sch:strip-fmt
+                             (sch:tbl-get tbl r
+                                          (sch:col info2 "DESCRIPTION"))))
+                          "*CASED*6\"*"))
+          (setq r10 r)))
+      (tst:assert "cased row updated with wall size" (if r10 T nil) T)
+      (if r10
+        (tst:assert "cased desc text"
+                    (sch:strip-fmt (sch:tbl-get tbl r10
+                                                (sch:col info2 "DESCRIPTION")))
+                    "CASED OPENING - 6\" WALL"))
+      ;; new 3'-0"x8'-0" door: appended as a new row (unless the table
+      ;; already had that size, in which case it merged there)
+      (setq rNew nil)
+      (foreach m (nth 5 info2)
+        (setq r (cdr m)
+              wtxt (sch:strip-fmt (sch:tbl-get tbl r
+                                               (sch:col info2 "WIDTH")))
+              htxt (sch:strip-fmt (sch:tbl-get tbl r
+                                               (sch:col info2 "HEIGHT"))))
+        (if (and (null rNew) (= wtxt "3'-0\"") (= htxt "8'-0\""))
+          (setq rNew r)))
+      (tst:assert "new 3080 row present" (if rNew T nil) T)
+      (if rNew
+        (tst:assert "new 3080 qty"
+                    (sch:strip-fmt (sch:tbl-get tbl rNew
+                                                (sch:col info2 "QTY")))
+                    "1"))
+      (cond
+        (hadblank
+         (tst:assert "blank spare row consumed (no growth)"
+                     (nth 3 info2) rowsBefore))
+        ((not had3080)
+         (tst:assert "table grew by one row"
+                     (nth 3 info2) (1+ rowsBefore))))
+      (tst:dump-table tbl info2 "DOOR AFTER")))
   (princ))
 
 ;;; ------------------------------------------------------------------
@@ -252,8 +424,10 @@
                    "  dwg: " (getvar "DWGNAME")))
   (tst:out "-- unit tests --")
   (tst:units)
-  (tst:out "-- integration tests --")
+  (tst:out "-- integration tests (window/tags) --")
   (tst:integration)
+  (tst:out "-- integration tests (door table, synthetic records) --")
+  (tst:integration-door)
   (tst:out (strcat "RESULT: " (itoa *tst:pass*) " passed, "
                    (itoa *tst:fail*) " failed"))
   (princ (strcat "\n[SCHTEST] Log: " *tst:path*))
