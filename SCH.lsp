@@ -55,6 +55,8 @@
 (setq *sch:use-explode* T)        ; nil = skip geometric swing-hand
                                   ; detection (set nil if it crashes)
 (setq *sch:diag-path* nil)        ; report path, set by SCHDIAG
+(setq *sch:explode-broken* nil)   ; set T automatically after repeated
+(setq *sch:explode-fails* 0)      ; explode failures (session cache)
 
 ;;; ------------------------------------------------------------------
 ;;; Generic guarded-call utilities
@@ -350,42 +352,41 @@
 ;;; Swing-hand detection (explode a copy, analyze arc + leaf)
 ;;; ------------------------------------------------------------------
 
-(defun sch:ents-after (marker / e out)
-  (setq e (if marker (entnext marker) (entnext)))
-  (while e
-    (setq out (cons e out) e (entnext e)))
-  (reverse out))
-
 ;; explode a copy of vlaObj (2 levels), return list of vla primitives.
 ;; caller must delete them with sch:del-ents.
-(defun sch:explode-copy (vlaObj / cp res out marker sub subres)
-  (setq cp (sch:catch 'vla-Copy (list vlaObj)))
-  (if cp
+;; ActiveX ONLY - never the command line: feeding _EXPLODE into the
+;; command stream mid-session collided with pending commands (BricsCAD
+;; BIM section prompts) and is banned. After 3 consecutive failures,
+;; swing detection is switched off for the rest of the session.
+(defun sch:explode-copy (vlaObj / cp res out sub subres)
+  (if (null *sch:explode-fails*) (setq *sch:explode-fails* 0))
+  (if (not *sch:explode-broken*)
     (progn
-      (setq res (sch:invoke cp 'Explode nil))
+      (setq cp (sch:catch 'vla-Copy (list vlaObj)))
+      (setq res (if cp (sch:invoke cp 'Explode nil)))
+      (if cp (sch:catch 'vla-Delete (list cp)))
       (if res
         (progn
-          (sch:catch 'vla-Delete (list cp))
-          (setq out res))
+          (setq *sch:explode-fails* 0)
+          ;; explode nested inserts one more level
+          (setq sub nil)
+          (foreach o res
+            (if (and o (= (sch:objname o) "AcDbBlockReference"))
+              (progn
+                (setq subres (sch:invoke o 'Explode nil))
+                (if subres
+                  (progn (setq sub (append sub subres))
+                         (sch:catch 'vla-Delete (list o)))
+                  (setq sub (cons o sub))))
+              (if o (setq sub (cons o sub)))))
+          (setq out (vl-remove nil sub)))
         (progn
-          ;; command fallback
-          (setq marker (entlast))
-          (sch:catch 'vl-cmdf
-            (list "_.EXPLODE" (vlax-vla-object->ename cp) ""))
-          (setq out (mapcar 'sch:vla (sch:ents-after marker)))
-          (if (null out) (sch:catch 'vla-Delete (list cp)))))
-      ;; explode nested inserts one more level
-      (setq sub nil)
-      (foreach o out
-        (if (and o (= (sch:objname o) "AcDbBlockReference"))
-          (progn
-            (setq subres (sch:invoke o 'Explode nil))
-            (if subres
-              (progn (setq sub (append sub subres))
-                     (sch:catch 'vla-Delete (list o)))
-              (setq sub (cons o sub))))
-          (if o (setq sub (cons o sub)))))
-      (vl-remove nil sub))))
+          (setq *sch:explode-fails* (1+ *sch:explode-fails*))
+          (if (>= *sch:explode-fails* 3)
+            (progn
+              (setq *sch:explode-broken* T)
+              (princ "\n[SCH] These objects cannot be exploded - swing detection off for this session.")))))))
+  out)
 
 (defun sch:del-ents (lst)
   (foreach o lst (if o (sch:catch 'vla-Delete (list o)))))
@@ -608,13 +609,13 @@
     (setq out (cons rec out)))
   out)
 
-;; xref harvesting: walk an xref insert's block definition, transform
-;; candidate points to world, keep those inside box p1-p2.
-(defun sch:harvest-xref (vlaIns p1 p2 walls / doc blocks bname bdef ip rot
-                          sx sy out c wpt kind cased inserts)
-  (setq doc (vla-get-ActiveDocument (vlax-get-acad-object))
-        blocks (vla-get-Blocks doc)
-        bname (sch:val->str (sch:prop vlaIns 'Name)))
+;; xref harvesting: walk an xref insert's block definition with a fast
+;; entget/entnext scan (no per-entity COM roundtrips - the old vlax-for
+;; walk made huge xrefs unusably slow), transform candidate points to
+;; world, keep those inside box p1-p2.
+(defun sch:harvest-xref (vlaIns p1 p2 walls / bname bdef e ed dxf nm ip
+                          rot sx sy out c wpt kind cased inserts v)
+  (setq bname (sch:val->str (sch:prop vlaIns 'Name)))
   (setq ip (sch:catch 'vlax-safearray->list
              (list (vlax-variant-value (vla-get-InsertionPoint vlaIns))))
         rot (sch:num-prop vlaIns "Rotation")
@@ -623,44 +624,39 @@
   (if (null rot) (setq rot 0.0))
   (if (null sx) (setq sx 1.0))
   (if (null sy) (setq sy 1.0))
-  (setq bdef (sch:catch 'vla-Item (list blocks bname)))
-  (if bdef
-    (sch:catch
-      '(lambda ()
-         (vlax-for e bdef
-           (setq kind nil cased nil)
-           (cond
-             ((= (sch:objname e) "AecDbDoor") (setq kind "DOOR"))
-             ((= (sch:objname e) "AecDbWindow") (setq kind "WINDOW"))
-             ((= (sch:objname e) "AecDbWindowAssembly") (setq kind "WINDOW"))
-             ((= (sch:objname e) "AecDbOpening")
-              (setq kind "DOOR" cased T)))
-           (if kind
-             (progn
-               (setq c (sch:bbox-center e))
-               (if c
-                 (progn
-                   (setq wpt (sch:xform-pt c ip rot sx sy))
-                   (if (sch:pt-in-box wpt p1 p2)
-                     ;; note: hand detection skipped for xref-resident
-                     ;; doors (cannot safely explode inside an xref)
-                     (setq out (cons (sch:harvest-aec e kind cased
-                                                      walls nil)
-                                     out)))))))
-           ;; tag INSERTs inside xrefs
-           (if (and (= (sch:objname e) "AcDbBlockReference")
-                    (wcmatch (strcase (sch:val->str (sch:prop e 'Name)))
-                             "TK_DOOR_TAG*,TK_WINDOW_TAG*"))
-             (progn
-               (setq c (sch:catch 'vlax-safearray->list
-                         (list (vlax-variant-value
-                                 (vla-get-InsertionPoint e)))))
-               (if c
-                 (progn
-                   (setq wpt (sch:xform-pt c ip rot sx sy))
-                   (if (sch:pt-in-box wpt p1 p2)
-                     (setq inserts (cons (cons e wpt) inserts)))))))))
-      nil))
+  (setq bdef (tblsearch "BLOCK" bname))
+  (setq e (if bdef (cdr (assoc -2 bdef))))
+  (while e
+    (setq ed (entget e)
+          dxf (cdr (assoc 0 ed))
+          kind nil cased nil)
+    (cond
+      ((= dxf "AEC_DOOR") (setq kind "DOOR"))
+      ((= dxf "AEC_WINDOW") (setq kind "WINDOW"))
+      ((= dxf "AEC_WINDOW_ASSEMBLY") (setq kind "WINDOW"))
+      ((= dxf "AEC_OPENING") (setq kind "DOOR" cased T)))
+    (cond
+      (kind
+       (setq v (sch:vla e)
+             c (if v (sch:bbox-center v)))
+       (if c
+         (progn
+           (setq wpt (sch:xform-pt c ip rot sx sy))
+           (if (sch:pt-in-box wpt p1 p2)
+             ;; note: hand detection skipped for xref-resident
+             ;; doors (cannot safely explode inside an xref)
+             (setq out (cons (sch:harvest-aec v kind cased walls nil)
+                             out))))))
+      ((and (= dxf "INSERT")
+            (setq nm (cdr (assoc 2 ed)))
+            (wcmatch (strcase nm) "TK_DOOR_TAG*,TK_WINDOW_TAG*"))
+       (setq c (cdr (assoc 10 ed)))
+       (if c
+         (progn
+           (setq wpt (sch:xform-pt c ip rot sx sy))
+           (if (sch:pt-in-box wpt p1 p2)
+             (setq inserts (cons (cons (sch:vla e) wpt) inserts)))))))
+    (setq e (entnext e)))
   ;; same rule as the top-level harvest: tag records only for kinds
   ;; with no AEC objects found (avoids double-counting tagged doors)
   (if inserts
@@ -676,34 +672,43 @@
   out)
 
 ;; main harvest: user picks two corners; returns list of records
-(defun sch:harvest ( / p1 p2 ss i e v on walls recs inserts kind cased
-                       isxref bd)
+(defun sch:harvest ( / p1 p2 ss i n e v on walls recs inserts kind cased
+                       isxref bd nAd nAw nAo nPx nTag nXr)
   (setq p1 (getpoint "\nSchedule area - first corner of plan region: "))
   (if p1 (setq p2 (getcorner p1 "\nOpposite corner: ")))
   (if (and p1 p2)
     (progn
-      (princ "\n[SCH] Scanning selection...")
+      (princ "\n[SCH] Scanning selection")
       (setq walls (sch:collect-walls))
+      (setq nAd 0 nAw 0 nAo 0 nPx 0 nTag 0 nXr 0)
       (setq ss (ssget "_C" p1 p2
-                 '((0 . "AEC_DOOR,AEC_WINDOW,AEC_WINDOW_ASSEMBLY,AEC_OPENING,INSERT"))))
+                 '((0 . "AEC_DOOR,AEC_WINDOW,AEC_WINDOW_ASSEMBLY,AEC_OPENING,INSERT,ACAD_PROXY_ENTITY"))))
       (if ss
         (progn
-          (setq i 0)
-          (while (< i (sslength ss))
-            (setq e (ssname ss i) v (sch:vla e)
-                  on (sch:objname v) kind nil cased nil)
+          (setq i 0 n (sslength ss))
+          (while (< i n)
+            (if (= (rem i 25) 0) (princ "."))
+            (setq e (ssname ss i)
+                  on (cdr (assoc 0 (entget e)))
+                  kind nil cased nil v nil)
             (cond
-              ((= on "AecDbDoor") (setq kind "DOOR"))
-              ((= on "AecDbWindow") (setq kind "WINDOW"))
-              ((= on "AecDbWindowAssembly") (setq kind "WINDOW"))
-              ((= on "AecDbOpening") (setq kind "DOOR" cased T)))
+              ((= on "AEC_DOOR") (setq kind "DOOR" nAd (1+ nAd)))
+              ((= on "AEC_WINDOW") (setq kind "WINDOW" nAw (1+ nAw)))
+              ((= on "AEC_WINDOW_ASSEMBLY")
+               (setq kind "WINDOW" nAw (1+ nAw)))
+              ((= on "AEC_OPENING") (setq kind "DOOR" cased T
+                                          nAo (1+ nAo)))
+              ((= on "ACAD_PROXY_ENTITY") (setq nPx (1+ nPx))))
             (cond
               (kind
+               (setq v (sch:vla e))
                ;; swing-hand detection is doors-only
-               (setq recs (cons (sch:harvest-aec v kind cased walls
-                                                 (= kind "DOOR"))
-                                recs)))
-              ((= on "AcDbBlockReference")
+               (if v
+                 (setq recs (cons (sch:harvest-aec v kind cased walls
+                                                   (= kind "DOOR"))
+                                  recs))))
+              ((= on "INSERT")
+               (setq v (sch:vla e))
                (setq isxref nil)
                (setq bd (sch:catch 'vla-Item
                           (list (vla-get-Blocks
@@ -714,10 +719,12 @@
                  (setq isxref T))
                (cond
                  (isxref
+                  (setq nXr (1+ nXr))
                   (setq recs (append recs
                                (sch:harvest-xref v p1 p2 walls))))
                  ((wcmatch (strcase (sch:val->str (sch:prop v 'Name)))
                            "TK_DOOR_TAG*,TK_WINDOW_TAG*")
+                  (setq nTag (1+ nTag))
                   (setq inserts
                     (cons (cons v
                                 (sch:catch 'vlax-safearray->list
@@ -725,6 +732,14 @@
                                           (vla-get-InsertionPoint v)))))
                           inserts))))))
             (setq i (1+ i)))))
+      ;; readable breakdown so an empty/partial result explains itself
+      (princ (strcat "\n[SCH] Region contents: " (itoa nAd)
+                     " AEC doors, " (itoa nAw) " AEC windows, "
+                     (itoa nAo) " AEC openings, " (itoa nTag)
+                     " tag inserts, " (itoa nXr) " xrefs, "
+                     (itoa nPx) " proxy entities."))
+      (if (> nPx 0)
+        (princ "\n[SCH] NOTE: proxy entities are unreadable here - that data needs AutoCAD Architecture (or AEC object enablers)."))
       ;; use tag-INSERT provider only for kinds with no AEC objects found
       (if inserts
         (progn
