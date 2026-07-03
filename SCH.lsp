@@ -843,6 +843,90 @@
         (setq r (1+ r)))))
   (list title hdr colmap rows cols (reverse marks)))
 
+;; all tables whose title matches pat AND that have a MARK header row
+;; -> list of (tbl info)
+(defun sch:find-tables (pat / ss i tbl info out)
+  (setq ss (ssget "_X" '((0 . "ACAD_TABLE"))))
+  (if ss
+    (progn
+      (setq i 0)
+      (while (< i (sslength ss))
+        (setq tbl (sch:vla (ssname ss i))
+              info (sch:table-info tbl))
+        (if (and (wcmatch (strcase (car info)) pat) (cadr info))
+          (setq out (cons (list tbl info) out)))
+        (setq i (1+ i)))))
+  (reverse out))
+
+;; create a DSLD-format schedule table at pt (top-left corner).
+;; ndata = expected data rows (3 blank spare rows are added).
+;; Matches the DSLD sheets: cols MARK|WIDTH|HEIGHT|QTY|DESCRIPTION,
+;; widths 27/30/33/21/177, row heights 14/13.33/12, text 6/5.5/4.5,
+;; "DSLD Table Style" when the drawing has it. Returns (tbl info).
+(defun sch:make-table (title pt ndata / doc msp tbl rows r c widths hdrs)
+  (setq doc (vla-get-ActiveDocument (vlax-get-acad-object))
+        msp (vla-get-ModelSpace doc)
+        rows (+ 2 ndata 3))
+  (setq tbl (sch:catch 'vlax-invoke
+              (list msp 'AddTable
+                    (list (car pt) (cadr pt) 0.0) rows 5 12.0 57.6)))
+  (if tbl
+    (progn
+      ;; use the DSLD table style if this drawing has it
+      (sch:catch 'vlax-put-property (list tbl 'StyleName "DSLD Table Style"))
+      (sch:invoke tbl 'SetRowHeight (list 0 14.0))
+      (sch:invoke tbl 'SetRowHeight (list 1 13.3333))
+      (setq widths '(27.0 30.0 33.0 21.0 177.0) c 0)
+      (foreach w widths
+        (sch:invoke tbl 'SetColumnWidth (list c w))
+        (setq c (1+ c)))
+      ;; row types: acDataRow=1 acTitleRow=2 acHeaderRow=4
+      (sch:invoke tbl 'SetTextHeight (list 2 6.0))
+      (sch:invoke tbl 'SetTextHeight (list 4 5.5))
+      (sch:invoke tbl 'SetTextHeight (list 1 4.5))
+      ;; data rows middle-center, DESCRIPTION column middle-left
+      (sch:invoke tbl 'SetAlignment (list 1 5))
+      (setq r 2)
+      (while (< r rows)
+        (sch:invoke tbl 'SetCellAlignment (list r 4 4))
+        (setq r (1+ r)))
+      (sch:tbl-set tbl 0 0 title)
+      (setq hdrs '("MARK" "WIDTH" "HEIGHT" "QTY" "DESCRIPTION") c 0)
+      (foreach h hdrs
+        (sch:tbl-set tbl 1 c h)
+        (setq c (1+ c)))
+      (list tbl (sch:table-info tbl)))))
+
+;; locate the schedule table for one kind, or create it where the
+;; user points. Exactly one match -> used automatically; several ->
+;; user picks; none -> user picks an insertion point for a new one.
+;; Returns (tbl info) or nil.
+(defun sch:resolve-table (title pat ndata / cands tbl info pt)
+  (setq cands (sch:find-tables pat))
+  (cond
+    ((= (length cands) 1)
+     (princ (strcat "\n[SCH] Found existing " title " - using it."))
+     (car cands))
+    ((> (length cands) 1)
+     (princ (strcat "\n[SCH] " (itoa (length cands))
+                    " tables match " title " (multiple schedule sets)."))
+     (setq tbl (sch:pick-table
+                 (strcat "\nSelect the " title
+                         " to fill (Enter to skip): ")))
+     (if tbl
+       (progn
+         (setq info (sch:table-info tbl))
+         (if (cadr info)
+           (list tbl info)
+           (progn
+             (princ "\n[SCH] That table has no MARK header row - skipped.")
+             nil)))))
+    (t
+     (princ (strcat "\n[SCH] No " title " found in this drawing."))
+     (setq pt (getpoint (strcat "\nPick top-left corner for a new "
+                                title " (Enter to skip): ")))
+     (if pt (sch:make-table title pt ndata)))))
+
 ;;; ------------------------------------------------------------------
 ;;; Merge: aggregated data + existing table -> planned rows
 ;;; plan entry:
@@ -1205,8 +1289,8 @@
 ;;; c:SCH - main command
 ;;; ------------------------------------------------------------------
 
-(defun c:SCH ( / doc recs waggs daggs wtbl dtbl winfo dinfo wplan dplan
-                 notes ok n oldecho *error*)
+(defun c:SCH ( / doc recs waggs daggs wres dres wtbl dtbl winfo dinfo
+                 wplan dplan notes ok n oldecho *error*)
   (defun *error* (msg)
     (if doc (sch:catch 'vla-EndUndoMark (list doc)))
     (if oldecho (setvar "CMDECHO" oldecho))
@@ -1235,31 +1319,21 @@
                     " window)."))
      (setq waggs (sch:aggregate recs "WINDOW")
            daggs (sch:aggregate recs "DOOR"))
-     ;; pick tables
-     (setq wtbl (sch:pick-table
-                  "\nSelect the WINDOW SCHEDULE table (Enter to skip): "))
-     (setq dtbl (sch:pick-table
-                  "\nSelect the DOOR SCHEDULE table (Enter to skip): "))
+     ;; locate / create the schedule tables (auto-find when unique,
+     ;; pick when several sets, create at a user point when missing)
+     (if waggs
+       (setq wres (sch:resolve-table "WINDOW SCHEDULE" "*WINDOW*"
+                                     (length waggs)))
+       (princ "\n[SCH] No windows in the selection - window schedule skipped."))
+     (if daggs
+       (setq dres (sch:resolve-table "DOOR SCHEDULE" "*DOOR*"
+                                     (length daggs)))
+       (princ "\n[SCH] No doors in the selection - door schedule skipped."))
+     (setq wtbl (car wres) winfo (cadr wres)
+           dtbl (car dres) dinfo (cadr dres))
      (if (and (null wtbl) (null dtbl))
-       (princ "\n[SCH] No tables selected - cancelled.")
+       (princ "\n[SCH] No schedule tables available - cancelled.")
        (progn
-         (if wtbl (setq winfo (sch:table-info wtbl)))
-         (if dtbl (setq dinfo (sch:table-info dtbl)))
-         ;; sanity notes
-         (if (and winfo (not (wcmatch (strcase (car winfo)) "*WINDOW*")))
-           (setq notes (cons (strcat "Selected window table title reads \""
-                                     (car winfo) "\"")
-                             notes)))
-         (if (and dinfo (not (wcmatch (strcase (car dinfo)) "*DOOR*")))
-           (setq notes (cons (strcat "Selected door table title reads \""
-                                     (car dinfo) "\"")
-                             notes)))
-         (if (and winfo (null (cadr winfo)))
-           (progn (setq notes (cons "Window table: no MARK header row found - skipped." notes))
-                  (setq wtbl nil winfo nil)))
-         (if (and dinfo (null (cadr dinfo)))
-           (progn (setq notes (cons "Door table: no MARK header row found - skipped." notes))
-                  (setq dtbl nil dinfo nil)))
          (if winfo (setq wplan (sch:merge wtbl winfo waggs "WINDOW")))
          (if dinfo (setq dplan (sch:merge dtbl dinfo daggs "DOOR")))
          (foreach p (append wplan dplan)

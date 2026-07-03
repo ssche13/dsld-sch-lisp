@@ -409,6 +409,107 @@
       (tst:dump-table tbl info2 "DOOR AFTER")))
   (princ))
 
+;; census of the current drawing (what would SCH have to work with?)
+(defun tst:count (label filt / ss)
+  (setq ss (ssget "_X" filt))
+  (tst:out (strcat "  " label ": " (if ss (itoa (sslength ss)) "0"))))
+
+(defun tst:census ()
+  (tst:count "AEC doors" '((0 . "AEC_DOOR")))
+  (tst:count "AEC windows" '((0 . "AEC_WINDOW")))
+  (tst:count "AEC window assemblies" '((0 . "AEC_WINDOW_ASSEMBLY")))
+  (tst:count "AEC openings" '((0 . "AEC_OPENING")))
+  (tst:count "AEC walls" '((0 . "AEC_WALL")))
+  (tst:count "AEC mvblock refs (tags)" '((0 . "AEC_MVBLOCK_REF")))
+  (tst:count "proxy entities" '((0 . "ACAD_PROXY_ENTITY")))
+  (tst:count "TK_ tag INSERTs" '((0 . "INSERT") (2 . "TK_*")))
+  (tst:count "ACAD tables" '((0 . "ACAD_TABLE")))
+  (tst:count "xref INSERTs" '((0 . "INSERT") (66 . 1)))
+  (princ))
+
+;; auto-create: build both charts from scratch at a far-away point,
+;; fill them from synthetic records, verify, then delete them.
+(defun tst:integration-create ( / res tbl info aggs plan written m r
+                                  wtxt found3050 found2040 dres dtbl
+                                  dinfo daggs dplan r1)
+  ;; ----- window chart -----
+  (setq res (sch:make-table "WINDOW SCHEDULE" (list 1.0e6 1.0e6) 2))
+  (tst:assert "make-table returns window table" (if res T nil) T)
+  (if res
+    (progn
+      (setq tbl (car res) info (cadr res))
+      (tst:assert "created objname" (sch:objname tbl) "AcDbTable")
+      (tst:assert "created title" (car info) "WINDOW SCHEDULE")
+      (tst:assert "created header row found" (if (cadr info) T nil) T)
+      (tst:assert "created rows (2+2 data+3 spare)" (nth 3 info) 7)
+      (tst:assert "created cols" (nth 4 info) 5)
+      (setq aggs (sch:aggregate
+                   (list (tst:make-rec "WINDOW" "" "3050" 1 36.0 60.0
+                                       nil nil nil)
+                         (tst:make-rec "WINDOW" "" "3050" 1 36.0 60.0
+                                       nil nil nil)
+                         (tst:make-rec "WINDOW" "" "2040" 1 24.0 48.0
+                                       nil nil nil))
+                   "WINDOW"))
+      (tst:assert "create-fill agg rows" (length aggs) 2)
+      (setq plan (sch:merge tbl info aggs "WINDOW"))
+      (setq *sch:handmode* "cols")
+      (setq written (sch:apply-plan tbl info plan "WINDOW"))
+      (tst:assert "create-fill rows written" written 2)
+      (setq info (sch:table-info tbl))
+      (tst:assert "marks A and B assigned"
+                  (and (assoc "A" (nth 5 info))
+                       (assoc "B" (nth 5 info))
+                       T) T)
+      (setq found3050 nil found2040 nil)
+      (foreach m (nth 5 info)
+        (setq r (cdr m)
+              wtxt (sch:strip-fmt (sch:tbl-get tbl r
+                                               (sch:col info "WIDTH"))))
+        (if (= wtxt "3'-0\"")
+          (setq found3050
+            (= (sch:strip-fmt (sch:tbl-get tbl r (sch:col info "QTY")))
+               "2")))
+        (if (= wtxt "2'-0\"")
+          (setq found2040
+            (= (sch:strip-fmt (sch:tbl-get tbl r (sch:col info "QTY")))
+               "1"))))
+      (tst:assert "3'-0\" row qty 2" found3050 T)
+      (tst:assert "2'-0\" row qty 1" found2040 T)
+      (tst:dump-table tbl info "CREATED WINDOW")
+      (sch:catch 'vla-Delete (list tbl))))
+  ;; ----- door chart (incl. LH/RH columns on a fresh table) -----
+  (setq dres (sch:make-table "DOOR SCHEDULE" (list 1.0e6 999000.0) 1))
+  (tst:assert "make-table returns door table" (if dres T nil) T)
+  (if dres
+    (progn
+      (setq dtbl (car dres) dinfo (cadr dres))
+      (setq daggs (sch:aggregate
+                    (list (tst:make-rec "DOOR" "" "2668" 1 30.0 80.0
+                                        "LH" nil nil))
+                    "DOOR"))
+      (setq dplan (sch:merge dtbl dinfo daggs "DOOR"))
+      (setq *sch:handmode* "cols")
+      (setq written (sch:apply-plan dtbl dinfo dplan "DOOR"))
+      (tst:assert "door create-fill written" written 1)
+      (setq dinfo (sch:table-info dtbl))
+      (tst:assert "created door LH col" (if (sch:col dinfo "LH") T nil) T)
+      (setq r1 (cdr (assoc "1" (nth 5 dinfo))))
+      (tst:assert "door mark 1 assigned" (if r1 T nil) T)
+      (if r1
+        (progn
+          (tst:assert "door 1 width"
+                      (sch:strip-fmt
+                        (sch:tbl-get dtbl r1 (sch:col dinfo "WIDTH")))
+                      "2'-6\"")
+          (tst:assert "door 1 LH"
+                      (sch:strip-fmt
+                        (sch:tbl-get dtbl r1 (sch:col dinfo "LH")))
+                      "1")))
+      (tst:dump-table dtbl dinfo "CREATED DOOR")
+      (sch:catch 'vla-Delete (list dtbl))))
+  (princ))
+
 ;;; ------------------------------------------------------------------
 
 (defun c:SCHTEST ( / fh)
@@ -422,12 +523,16 @@
   (tst:out "==========================================================")
   (tst:out (strcat "SCHTEST  product: " (getvar "ACADVER")
                    "  dwg: " (getvar "DWGNAME")))
+  (tst:out "-- census --")
+  (tst:census)
   (tst:out "-- unit tests --")
   (tst:units)
   (tst:out "-- integration tests (window/tags) --")
   (tst:integration)
   (tst:out "-- integration tests (door table, synthetic records) --")
   (tst:integration-door)
+  (tst:out "-- integration tests (auto-create charts) --")
+  (tst:integration-create)
   (tst:out (strcat "RESULT: " (itoa *tst:pass*) " passed, "
                    (itoa *tst:fail*) " failed"))
   (princ (strcat "\n[SCHTEST] Log: " *tst:path*))
