@@ -546,10 +546,23 @@
     (setq v (sch:catch 'vlax-variant-value (list v))))
   (if (numberp v) v nil))
 
+;; getpropertyvalue-based reader (AutoCAD 2012+/BricsCAD) - reaches
+;; data on entities whose COM wrapper exposes nothing (BricsCAD shows
+;; only Layer/ObjectName on ACA doors).
+(defun sch:gprop (ename name)
+  (if (and ename (member "GETPROPERTYVALUE" (atoms-family 1)))
+    (sch:catch 'getpropertyvalue (list ename name))))
+
+(defun sch:gprop-num (ename name / v)
+  (setq v (sch:gprop ename name))
+  (cond ((numberp v) v)
+        ((and (eq (type v) 'STR) (distof v)) (distof v))))
+
 ;; harvest one AEC object (door/window/opening) -> record
 (defun sch:harvest-aec (vlaObj kind cased walls needhand
                         / psets mark code sz mult win hin hand style
-                          center wrec wallcls swingval)
+                          center wrec wallcls swingval en bb dx dy dz
+                          meas)
   (setq psets (sch:psets vlaObj)
         style (sch:style-name vlaObj)
         center (sch:bbox-center vlaObj))
@@ -564,6 +577,22 @@
     (setq mult 1))
   (if (null win) (setq win (sch:num-prop vlaObj "Width")))
   (if (null hin) (setq hin (sch:num-prop vlaObj "Height")))
+  ;; non-COM property channel (BricsCAD's COM wrapper hides AEC data)
+  (setq en (sch:catch 'vlax-vla-object->ename (list vlaObj)))
+  (if (null win) (setq win (sch:gprop-num en "Width")))
+  (if (null hin) (setq hin (sch:gprop-num en "Height")))
+  (if (= style "") (setq style (sch:val->str (sch:gprop en "Style"))))
+  ;; last resort: measure the bounding box (plan extent = width,
+  ;; 3D extent = height), snapped to the nearest inch
+  (if (and (null win) (setq bb (sch:bbox vlaObj)))
+    (progn
+      (setq dx (- (car (cadr bb)) (car (car bb)))
+            dy (- (cadr (cadr bb)) (cadr (car bb)))
+            dz (- (caddr (cadr bb)) (caddr (car bb))))
+      (setq win (float (fix (+ (max dx dy) 0.5))))
+      (if (and (null hin) (> dz 12.0))
+        (setq hin (float (fix (+ dz 0.5)))))
+      (if (> win 0.0) (setq meas T) (setq win nil))))
   ;; hand: property set first (any *SWING*/*HAND* property), else geometry
   (if (and needhand (not cased))
     (progn
@@ -579,7 +608,7 @@
   (list (cons "KIND" kind) (cons "MARK" mark) (cons "CODE" code)
         (cons "MULT" mult) (cons "WIN" win) (cons "HIN" hin)
         (cons "HAND" hand) (cons "CASED" cased) (cons "WALL" wallcls)
-        (cons "STYLE" style) (cons "SRC" "aec")))
+        (cons "STYLE" style) (cons "MEAS" meas) (cons "SRC" "aec")))
 
 ;; INSERT-tag fallback: collect tag inserts from a list of
 ;; (vlaIns . worldPt) pairs. Returns list of records.
@@ -811,7 +840,7 @@
                       (if (sch:rget r "WALL") (sch:rget r "WALL") ""))))))
 
 (defun sch:aggregate (recs kind / groups key g out mark win hin qty lh rh
-                        cased wall code notes sty mlt)
+                        cased wall code notes sty mlt meas)
   (setq groups nil)
   (foreach r recs
     (if (= (sch:rget r "KIND") kind)
@@ -823,9 +852,10 @@
           (setq groups (cons (cons key (list r)) groups))))))
   (foreach g groups
     (setq mark "" win nil hin nil qty 0 lh 0 rh 0
-          cased nil wall nil code "" notes "" sty "" mlt 1)
+          cased nil wall nil code "" notes "" sty "" mlt 1 meas nil)
     (foreach r (cdr g)
       (setq qty (+ qty 1))
+      (if (sch:rget r "MEAS") (setq meas T))
       (if (and (= sty "") (sch:rget r "STYLE")
                (/= (sch:rget r "STYLE") ""))
         (setq sty (sch:rget r "STYLE")))
@@ -844,6 +874,9 @@
             ((= (sch:rget r "HAND") "RH") (setq rh (1+ rh)))))
     (if (and (= kind "DOOR") (not cased) (< (+ lh rh) qty))
       (setq notes (strcat (itoa (- qty lh rh)) " swing unknown")))
+    (if meas
+      (setq notes (strcat notes (if (= notes "") "" "; ")
+                          "sizes measured from geometry - verify")))
     (setq out (cons (list mark win hin qty lh rh cased wall code notes
                           sty mlt)
                     out)))
@@ -1502,6 +1535,26 @@
                         (v (vl-princ-to-string v))
                         (t "nil"))))))))))
 
+;; probe getpropertyvalue with likely AEC property names
+(defun sch:diag-gprops (f ename / v hits)
+  (if (member "GETPROPERTYVALUE" (atoms-family 1))
+    (progn
+      (setq hits 0)
+      (foreach n '("Width" "Height" "Rise" "Style" "StyleName"
+                   "Description" "DoorWidth" "DoorHeight" "LeafWidth"
+                   "FrameWidth" "OpenPercent" "SwingAngle" "Measure"
+                   "WallWidth" "BaseHeight" "Length" "Elevation")
+        (setq v (sch:catch 'getpropertyvalue (list ename n)))
+        (if v
+          (progn
+            (setq hits (1+ hits))
+            (sch:diag-out f (strcat "    gpv ." n " = "
+                                    (vl-princ-to-string v))))))
+      (if (= hits 0)
+        (sch:diag-out f "    (getpropertyvalue returned nothing)")))
+    (sch:diag-out f "    (getpropertyvalue not available)"))
+  (princ))
+
 (defun sch:diag-psets (f obj / psets)
   (setq psets (sch:psets obj))
   (if psets
@@ -1560,7 +1613,7 @@
   (princ))
 
 (defun c:SCHDIAG ( / fh es v on ename walls hand prims done ss i tbl
-                     info oldecho kw *error*)
+                     info oldecho kw bb *error*)
   (defun *error* (msg)
     (if oldecho (setvar "CMDECHO" oldecho))
     (if (and msg (not (wcmatch (strcase msg) "*BREAK*,*CANCEL*,*EXIT*")))
@@ -1585,7 +1638,7 @@
     "\nTest door explode / swing detection? [Yes/No] <Yes>: "))
   (setq *sch:use-explode* (/= kw "No"))
   (sch:diag-out nil "==========================================================")
-  (sch:diag-out nil (strcat "SCHDIAG v1.2  dwg: " (getvar "DWGNAME")
+  (sch:diag-out nil (strcat "SCHDIAG v1.8  dwg: " (getvar "DWGNAME")
                             "  date: " (rtos (getvar "CDATE") 2 6)))
   (sch:diag-out nil (strcat "  product: " (getvar "ACADVER")
                             "  aecx-gate: " (if *sch:use-aecx* "ON" "OFF")
@@ -1640,8 +1693,20 @@
                                   "  handle=" (sch:val->str (sch:prop v 'Handle))))
         (sch:diag-out nil (strcat "    dxf type: "
                                   (cdr (assoc 0 (entget ename)))))
+        (sch:diag-out nil "STEP: raw entget dump...")
+        (sch:diag-dumpent nil ename "      ")
         (sch:diag-out nil "STEP: ActiveX property probe...")
         (sch:diag-props nil v)
+        (sch:diag-out nil "STEP: getpropertyvalue probe...")
+        (sch:diag-gprops nil ename)
+        (setq bb (sch:bbox v))
+        (if bb
+          (sch:diag-out nil
+            (strcat "    bbox dx/dy/dz = "
+                    (rtos (- (car (cadr bb)) (car (car bb))) 2 2) " / "
+                    (rtos (- (cadr (cadr bb)) (cadr (car bb))) 2 2) " / "
+                    (rtos (- (caddr (cadr bb)) (caddr (car bb))) 2 2)))
+          (sch:diag-out nil "    (no bounding box)"))
         (if *sch:use-aecx*
           (progn
             (sch:diag-out nil
