@@ -58,6 +58,18 @@
 (setq *sch:explode-broken* nil)   ; set T automatically after repeated
 (setq *sch:explode-fails* 0)      ; explode failures (session cache)
 
+;; Standard DSLD descriptions written into NEW schedule rows (existing
+;; text is never overwritten). First style-name pattern that matches
+;; wins - edit these freely to match office wording.
+(setq *sch:desc-map*
+  '(("*GARAGE*"   . "OVERHEAD GARAGE DOOR")
+    ("*POCKET*"   . "POCKET - INT. GRADE - SEE P.O.")
+    ("*BIFOLD*"   . "BIFOLD - INT. GRADE - SEE P.O.")
+    ("*DOORWALL*" . "SLIDING GLASS DOOR")
+    ("*EXTERIOR*" . "EXT. GRADE - FIBERGLASS")))
+(setq *sch:desc-door-default* "INTERIOR GRADE - HOLLOW CORE - SEE P.O.")
+(setq *sch:desc-window-default* "1/1 EQ. SASH - VINYL SINGLE HUNG")
+
 ;;; ------------------------------------------------------------------
 ;;; Generic guarded-call utilities
 ;;; ------------------------------------------------------------------
@@ -799,7 +811,7 @@
                       (if (sch:rget r "WALL") (sch:rget r "WALL") ""))))))
 
 (defun sch:aggregate (recs kind / groups key g out mark win hin qty lh rh
-                        cased wall code notes)
+                        cased wall code notes sty mlt)
   (setq groups nil)
   (foreach r recs
     (if (= (sch:rget r "KIND") kind)
@@ -811,9 +823,14 @@
           (setq groups (cons (cons key (list r)) groups))))))
   (foreach g groups
     (setq mark "" win nil hin nil qty 0 lh 0 rh 0
-          cased nil wall nil code "" notes "")
+          cased nil wall nil code "" notes "" sty "" mlt 1)
     (foreach r (cdr g)
       (setq qty (+ qty 1))
+      (if (and (= sty "") (sch:rget r "STYLE")
+               (/= (sch:rget r "STYLE") ""))
+        (setq sty (sch:rget r "STYLE")))
+      (if (and (sch:rget r "MULT") (> (sch:rget r "MULT") 1))
+        (setq mlt (sch:rget r "MULT")))
       (if (and (= mark "") (/= (sch:rget r "MARK") ""))
         (setq mark (sch:rget r "MARK")))
       (if (and (null win) (sch:rget r "WIN"))
@@ -827,7 +844,8 @@
             ((= (sch:rget r "HAND") "RH") (setq rh (1+ rh)))))
     (if (and (= kind "DOOR") (not cased) (< (+ lh rh) qty))
       (setq notes (strcat (itoa (- qty lh rh)) " swing unknown")))
-    (setq out (cons (list mark win hin qty lh rh cased wall code notes)
+    (setq out (cons (list mark win hin qty lh rh cased wall code notes
+                          sty mlt)
                     out)))
   out)
 
@@ -1006,6 +1024,24 @@
     (strcat "CASED OPENING - " wall "\" WALL")
     "CASED OPENING"))
 
+;; standard DSLD description for a NEW schedule row, from the style
+;; name (pattern map in the config block), kind, leaf count and width.
+(defun sch:auto-desc (kind style mult win / s out)
+  (setq s (strcase (if style style "")))
+  (foreach pair *sch:desc-map*
+    (if (and (null out) (/= s "") (wcmatch s (car pair)))
+      (setq out (cdr pair))))
+  (if (and (null out) (= kind "DOOR") (numberp win) (>= win 90.0))
+    (setq out "OVERHEAD GARAGE DOOR")) ; very wide non-cased door
+  (if (null out)
+    (setq out (if (= kind "WINDOW")
+                *sch:desc-window-default*
+                *sch:desc-door-default*)))
+  (if (and (= kind "DOOR") mult (> mult 1)
+           (not (wcmatch (strcase out) "DBL*")))
+    (setq out (strcat "DBL. " out)))
+  out)
+
 ;; first "spare" data row mark: mark pre-filled (like the window
 ;; table's F/G/H rows) but QTY and WIDTH cells empty; skips marks
 ;; already taken this run. Returns the mark string or nil.
@@ -1125,6 +1161,10 @@
           (setq desc nil))
         (if (and desc (/= curd "") (not (wcmatch (strcase curd) "*CASED*")))
           (setq desc nil)) ; don't clobber a real description
+        ;; fill an EMPTY existing description with the standard text
+        (if (and (null desc) (= curd "") (not (nth 6 a)))
+          (setq desc (sch:auto-desc kind (nth 10 a) (nth 11 a)
+                                    (cadr a))))
         (setq flag
           (if (and (or (= wtxt "") (= curw wtxt))
                    (or (= htxt "") (= curh htxt))
@@ -1133,7 +1173,7 @@
             "=" "~")))
       (setq rowidx nil))
     (if (and (= flag "+") (null desc) (not (nth 6 a)))
-      (setq desc "")) ; new non-cased row: empty desc for user to fill
+      (setq desc (sch:auto-desc kind (nth 10 a) (nth 11 a) (cadr a))))
     (setq plan (cons (list rowidx mark wtxt htxt qty lh rh desc flag
                            (nth 9 a))
                      plan)))

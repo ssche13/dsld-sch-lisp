@@ -127,6 +127,30 @@
   (tst:assert "wall-class 6" (sch:wall-class (list nil nil 5.5)) "6")
   (tst:assert "cased desc"
               (sch:cased-desc "6") "CASED OPENING - 6\" WALL")
+  ;; --- auto descriptions ---
+  (tst:assert "auto-desc garage style"
+              (sch:auto-desc "DOOR" "TK_Garage-Brick" 1 192.0)
+              "OVERHEAD GARAGE DOOR")
+  (tst:assert "auto-desc garage by size"
+              (sch:auto-desc "DOOR" "" 1 96.0)
+              "OVERHEAD GARAGE DOOR")
+  (tst:assert "auto-desc exterior"
+              (sch:auto-desc "DOOR" "TK_S-Hinged-Exterior-Brick-Trim"
+                             1 36.0)
+              "EXT. GRADE - FIBERGLASS")
+  (tst:assert "auto-desc interior default"
+              (sch:auto-desc "DOOR" "TK_S-Hinged-Trim" 1 32.0)
+              "INTERIOR GRADE - HOLLOW CORE - SEE P.O.")
+  (tst:assert "auto-desc double prefix"
+              (sch:auto-desc "DOOR" "TK_D-Hinged-Trim" 2 48.0)
+              "DBL. INTERIOR GRADE - HOLLOW CORE - SEE P.O.")
+  (tst:assert "auto-desc window default"
+              (sch:auto-desc "WINDOW" "TK_Double-Hung" 1 36.0)
+              "1/1 EQ. SASH - VINYL SINGLE HUNG")
+  (tst:assert "auto-desc sliding"
+              (sch:auto-desc "DOOR" "TK_DoorWall-Center-Brick-Trim"
+                             1 72.0)
+              "SLIDING GLASS DOOR")
   (princ))
 
 ;;; ------------------------------------------------------------------
@@ -480,6 +504,12 @@
                "1"))))
       (tst:assert "3'-0\" row qty 2" found3050 T)
       (tst:assert "2'-0\" row qty 1" found2040 T)
+      (setq r (cdr (assoc "A" (nth 5 info))))
+      (if r
+        (tst:assert "window A auto-description"
+                    (sch:strip-fmt
+                      (sch:tbl-get tbl r (sch:col info "DESCRIPTION")))
+                    "1/1 EQ. SASH - VINYL SINGLE HUNG"))
       (tst:dump-table tbl info "CREATED WINDOW")
       (sch:catch 'vla-Delete (list tbl))))
   ;; ----- door chart (incl. LH/RH columns on a fresh table) -----
@@ -509,7 +539,12 @@
           (tst:assert "door 1 LH"
                       (sch:strip-fmt
                         (sch:tbl-get dtbl r1 (sch:col dinfo "LH")))
-                      "1")))
+                      "1")
+          (tst:assert "door 1 auto-description"
+                      (sch:strip-fmt
+                        (sch:tbl-get dtbl r1
+                                     (sch:col dinfo "DESCRIPTION")))
+                      "INTERIOR GRADE - HOLLOW CORE - SEE P.O.")))
       (tst:dump-table dtbl dinfo "CREATED DOOR")
       (sch:catch 'vla-Delete (list dtbl))))
   (princ))
