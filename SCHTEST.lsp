@@ -129,28 +129,48 @@
               (sch:cased-desc "6") "CASED OPENING - 6\" WALL")
   ;; --- auto descriptions ---
   (tst:assert "auto-desc garage style"
-              (sch:auto-desc "DOOR" "TK_Garage-Brick" 1 192.0)
+              (sch:auto-desc "DOOR" "TK_Garage-Brick" 1 192.0 84.0)
               "OVERHEAD GARAGE DOOR")
   (tst:assert "auto-desc garage by size"
-              (sch:auto-desc "DOOR" "" 1 96.0)
+              (sch:auto-desc "DOOR" "" 1 96.0 84.0)
               "OVERHEAD GARAGE DOOR")
   (tst:assert "auto-desc exterior"
               (sch:auto-desc "DOOR" "TK_S-Hinged-Exterior-Brick-Trim"
-                             1 36.0)
+                             1 36.0 80.0)
               "EXT. GRADE - FIBERGLASS")
-  (tst:assert "auto-desc interior default"
-              (sch:auto-desc "DOOR" "TK_S-Hinged-Trim" 1 32.0)
+  (tst:assert "auto-desc interior catalog"
+              (sch:auto-desc "DOOR" "TK_S-Hinged-Trim" 1 32.0 80.0)
               "INTERIOR GRADE - HOLLOW CORE - SEE P.O.")
-  (tst:assert "auto-desc double prefix"
-              (sch:auto-desc "DOOR" "TK_D-Hinged-Trim" 2 48.0)
-              "DBL. INTERIOR GRADE - HOLLOW CORE - SEE P.O.")
-  (tst:assert "auto-desc window default"
-              (sch:auto-desc "WINDOW" "TK_Double-Hung" 1 36.0)
+  (tst:assert "auto-desc front door by size"
+              (sch:auto-desc "DOOR" "" 1 36.0 80.0)
+              "4 LITE EXT. GRADE W/ BOTTOM PANEL")
+  (tst:assert "auto-desc double catalog"
+              (sch:auto-desc "DOOR" "TK_D-Hinged-Trim" 2 48.0 80.0)
+              "DBL. 4068 INT. GRADE - HOLLOW CORE - SEE P.O.")
+  (tst:assert "auto-desc window catalog"
+              (sch:auto-desc "WINDOW" "TK_Double-Hung" 1 36.0 72.0)
               "1/1 EQ. SASH - VINYL SINGLE HUNG")
+  (tst:assert "auto-desc window fixed by size"
+              (sch:auto-desc "WINDOW" "" 1 36.0 36.0)
+              "FIXED - OBSCURE - TEMPERED")
   (tst:assert "auto-desc sliding"
               (sch:auto-desc "DOOR" "TK_DoorWall-Center-Brick-Trim"
-                             1 72.0)
+                             1 72.0 80.0)
               "SLIDING GLASS DOOR")
+  ;; --- measured-size snapping (casing math from the libraries) ---
+  (tst:assert "snap door 40 incl casing -> 2'-8\""
+              (sch:snap-std "DOOR" 40.0 80.0 T nil)
+              (list 32.0 80.0
+                    "INTERIOR GRADE - HOLLOW CORE - SEE P.O." T))
+  (tst:assert "snap window 41 incl casing -> 3'-0\"x6'-0\""
+              (sch:snap-std "WINDOW" 41.0 72.0 T nil)
+              (list 36.0 72.0 "1/1 EQ. SASH - VINYL SINGLE HUNG" T))
+  (tst:assert "snap cased opening no allowance"
+              (sch:snap-std "DOOR" 42.0 96.0 T T)
+              (list 42.0 96.0 "CASED OPENING" T))
+  (tst:assert "snap non-standard does not snap"
+              (cadddr (sch:snap-std "DOOR" 55.0 80.0 nil nil))
+              nil)
   (princ))
 
 ;;; ------------------------------------------------------------------

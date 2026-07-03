@@ -70,6 +70,39 @@
 (setq *sch:desc-door-default* "INTERIOR GRADE - HOLLOW CORE - SEE P.O.")
 (setq *sch:desc-window-default* "1/1 EQ. SASH - VINYL SINGLE HUNG")
 
+;; Casing math, measured from the DSLD style libraries: casing is a
+;; 3.5" 1x4 (2.5" beyond the 1.5" jamb/frame). A door drawn to the
+;; outside of its casing = leaf + 8"; a window = width + 5". Cased
+;; openings (Doorway_Arch) draw at face value - no correction.
+;; If snapped sizes come out one size SMALL, the door style measures
+;; to the wall opening instead - change 8.0 to 3.0.
+(setq *sch:door-trim-allow* 8.0)
+(setq *sch:win-trim-allow* 5.0)
+(setq *sch:snap-tol* 4.0) ; max inches between measured and standard
+
+;; DSLD standard catalog - mined from 61 real schedule tables across
+;; 7 plan families (569 doors / 297 windows, QTY-weighted), ordered
+;; most-common first. (width height "most common description")
+(setq *sch:std-doors*
+  '((32.0 80.0 "INTERIOR GRADE - HOLLOW CORE - SEE P.O.")
+    (28.0 80.0 "INTERIOR GRADE - HOLLOW CORE - SEE P.O.")
+    (48.0 80.0 "DBL. 4068 INT. GRADE - HOLLOW CORE - SEE P.O.")
+    (24.0 80.0 "INTERIOR GRADE - HOLLOW CORE - SEE P.O.")
+    (36.0 80.0 "4 LITE EXT. GRADE W/ BOTTOM PANEL")
+    (192.0 84.0 "OVERHEAD GARAGE DOOR")
+    (18.0 80.0 "INTERIOR GRADE - HOLLOW CORE - SEE P.O.")
+    (42.0 96.0 "CASED OPENING")
+    (48.0 96.0 "CASED OPENING")
+    (36.0 96.0 "EXTERIOR GRADE - SEE P.O.")
+    (96.0 96.0 "CASED OPENING")))
+(setq *sch:std-windows*
+  '((36.0 72.0 "1/1 EQ. SASH - VINYL SINGLE HUNG")
+    (36.0 36.0 "FIXED - OBSCURE - TEMPERED")
+    (36.0 66.0 "4/4 EQ. SASH - VINYL SINGLE HUNG")
+    (38.0 38.0 "FIXED - RAIN PATTERN - TEMPERED")
+    (72.0 72.0 "DBL. 3060 - 4/4 EQ. SASH - VINYL SINGLE HUNG")
+    (24.0 48.0 "6 LITE FIXED")))
+
 ;;; ------------------------------------------------------------------
 ;;; Generic guarded-call utilities
 ;;; ------------------------------------------------------------------
@@ -562,7 +595,7 @@
 (defun sch:harvest-aec (vlaObj kind cased walls needhand
                         / psets mark code sz mult win hin hand style
                           center wrec wallcls swingval en bb dx dy dz
-                          meas)
+                          meas snap)
   (setq psets (sch:psets vlaObj)
         style (sch:style-name vlaObj)
         center (sch:bbox-center vlaObj))
@@ -593,6 +626,12 @@
       (if (and (null hin) (> dz 12.0))
         (setq hin (float (fix (+ dz 0.5)))))
       (if (> win 0.0) (setq meas T) (setq win nil))))
+  ;; snap measured sizes onto the DSLD standard catalog (casing math)
+  (if (and meas win)
+    (progn
+      (setq snap (sch:snap-std kind win hin T cased))
+      (if (cadddr snap)
+        (setq win (car snap) hin (cadr snap)))))
   ;; hand: property set first (any *SWING*/*HAND* property), else geometry
   (if (and needhand (not cased))
     (progn
@@ -1057,13 +1096,43 @@
     (strcat "CASED OPENING - " wall "\" WALL")
     "CASED OPENING"))
 
-;; standard DSLD description for a NEW schedule row, from the style
-;; name (pattern map in the config block), kind, leaf count and width.
-(defun sch:auto-desc (kind style mult win / s out)
+;; snap a measured size to the nearest DSLD standard catalog entry.
+;; meas T = size came from a bounding box that includes the casing -
+;; subtract the trim allowance first (cased openings draw bare).
+;; Returns (width height desc T) when snapped, (w h nil nil) if not.
+(defun sch:snap-std (kind win hin meas cased / cat w best bestd d)
+  (setq cat (if (= kind "WINDOW") *sch:std-windows* *sch:std-doors*)
+        w win)
+  (if (and meas (not cased))
+    (setq w (- w (if (= kind "WINDOW")
+                   *sch:win-trim-allow*
+                   *sch:door-trim-allow*))))
+  (setq bestd (+ *sch:snap-tol* 1e-6))
+  (foreach s cat
+    (setq d (+ (abs (- (car s) w))
+               (if (and hin (cadr s))
+                 (* 0.5 (abs (- (cadr s) hin)))
+                 0.0)))
+    (if (< d bestd) (setq bestd d best s)))
+  (if best
+    (list (car best) (cadr best) (caddr best) T)
+    (list w hin nil nil)))
+
+;; standard DSLD description for a NEW schedule row: explicit style
+;; pattern first, then the mined size catalog, then kind defaults.
+(defun sch:auto-desc (kind style mult win hin / s out cat)
   (setq s (strcase (if style style "")))
   (foreach pair *sch:desc-map*
     (if (and (null out) (/= s "") (wcmatch s (car pair)))
       (setq out (cdr pair))))
+  (if (null out)
+    (progn
+      (setq cat (if (= kind "WINDOW") *sch:std-windows* *sch:std-doors*))
+      (foreach e cat
+        (if (and (null out) (numberp win)
+                 (equal win (car e) 1.0)
+                 (or (null hin) (equal hin (cadr e) 1.0)))
+          (setq out (caddr e))))))
   (if (and (null out) (= kind "DOOR") (numberp win) (>= win 90.0))
     (setq out "OVERHEAD GARAGE DOOR")) ; very wide non-cased door
   (if (null out)
@@ -1197,7 +1266,7 @@
         ;; fill an EMPTY existing description with the standard text
         (if (and (null desc) (= curd "") (not (nth 6 a)))
           (setq desc (sch:auto-desc kind (nth 10 a) (nth 11 a)
-                                    (cadr a))))
+                                    (cadr a) (caddr a))))
         (setq flag
           (if (and (or (= wtxt "") (= curw wtxt))
                    (or (= htxt "") (= curh htxt))
@@ -1206,7 +1275,8 @@
             "=" "~")))
       (setq rowidx nil))
     (if (and (= flag "+") (null desc) (not (nth 6 a)))
-      (setq desc (sch:auto-desc kind (nth 10 a) (nth 11 a) (cadr a))))
+      (setq desc (sch:auto-desc kind (nth 10 a) (nth 11 a) (cadr a)
+                                (caddr a))))
     (setq plan (cons (list rowidx mark wtxt htxt qty lh rh desc flag
                            (nth 9 a))
                      plan)))
