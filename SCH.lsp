@@ -42,6 +42,11 @@
 ;;; Configuration
 ;;; ------------------------------------------------------------------
 
+(setq *sch:version* "2.4")
+(setq *sch:home* "E:/Megans lisp routines/SCH.lsp") ; default install path
+(setq *sch:raw-base*
+  "https://raw.githubusercontent.com/ssche13/dsld-sch-lisp/main/")
+
 (setq *sch:wall6-threshold* 5.0)  ; host wall Width >= 5.0" => 6" wall
 (setq *sch:hand-convention* "AWAY") ; "AWAY": viewer on the side the door
                                     ; opens away from (US standard).
@@ -2153,6 +2158,134 @@
   (princ))
 
 ;;; ------------------------------------------------------------------
+;;; Auto-load install + GitHub updates
+;;; ------------------------------------------------------------------
+
+(defun sch:slash (p) (vl-string-translate "\\" "/" p))
+
+;; where this file lives (support path first, then the default home)
+(defun sch:selfpath ( / p)
+  (cond ((setq p (findfile "SCH.lsp")) (sch:slash p))
+        ((setq p (findfile *sch:home*)) (sch:slash p))))
+
+(defun sch:file-contains (path pat / f line found)
+  (if (and path (setq f (open path "r")))
+    (progn
+      (while (and (not found) (setq line (read-line f)))
+        (if (wcmatch line (strcat "*" pat "*")) (setq found T)))
+      (close f)))
+  found)
+
+;; append a guarded load line to acaddoc.lsp (loaded per drawing by
+;; both BricsCAD and AutoCAD) so SCH is available in every session.
+;; Idempotent - the SCH-AUTOLOAD marker prevents duplicates.
+(defun sch:autoinstall ( / self tgt f dir)
+  (setq self (sch:selfpath))
+  (if self
+    (progn
+      (setq tgt (findfile "acaddoc.lsp"))
+      (if (null tgt)
+        (progn
+          (setq dir (strcat (getvar "ROAMABLEROOTPREFIX") "Support"))
+          (vl-mkdir dir)
+          (setq tgt (strcat dir "\\acaddoc.lsp"))))
+      (if (not (sch:file-contains (findfile tgt) "SCH-AUTOLOAD"))
+        (progn
+          (setq f (open tgt "a"))
+          (if f
+            (progn
+              (write-line "" f)
+              (write-line ";; SCH-AUTOLOAD (added by SCH.lsp; remove with SCHUNINSTALL)" f)
+              (write-line (strcat "(if (findfile \"" self
+                                  "\") (load \"" self "\" nil))")
+                          f)
+              (close f)
+              (princ (strcat "\n[SCH] Auto-load installed ("
+                             (sch:slash tgt)
+                             ") - SCH now loads in every drawing. SCHUNINSTALL removes it."))))))))
+  (princ))
+
+(defun c:SCHUNINSTALL ( / tgt f lines line out skipnext)
+  (setq tgt (findfile "acaddoc.lsp"))
+  (if (and tgt (sch:file-contains tgt "SCH-AUTOLOAD"))
+    (progn
+      (setq f (open tgt "r") lines nil)
+      (while (setq line (read-line f))
+        (setq lines (cons line lines)))
+      (close f)
+      (setq out nil skipnext nil)
+      (foreach line (reverse lines)
+        (cond
+          (skipnext (setq skipnext nil))
+          ((wcmatch line "*SCH-AUTOLOAD*") (setq skipnext T))
+          (t (setq out (cons line out)))))
+      (setq f (open tgt "w"))
+      (foreach line (reverse out) (write-line line f))
+      (close f)
+      (princ (strcat "\n[SCH] Auto-load removed from " (sch:slash tgt))))
+    (princ "\n[SCH] No auto-load entry found."))
+  (princ))
+
+(defun sch:http-get (url / req status body)
+  (setq req (sch:catch 'vlax-create-object
+              (list "WinHttp.WinHttpRequest.5.1")))
+  (if (null req)
+    (setq req (sch:catch 'vlax-create-object (list "MSXML2.XMLHTTP"))))
+  (if req
+    (progn
+      (sch:catch 'vlax-invoke-method (list req 'Open "GET" url
+                                           :vlax-false))
+      (sch:catch 'vlax-invoke-method (list req 'Send))
+      (setq status (sch:catch 'vlax-get-property (list req 'Status)))
+      (if (and status (= status 200))
+        (setq body (sch:catch 'vlax-get-property (list req
+                                                       'ResponseText))))
+      (sch:catch 'vlax-release-object (list req))))
+  body)
+
+;; pull the latest SCH.lsp (and SCHTEST.lsp when present) from GitHub,
+;; back up the old file, overwrite, reload.
+(defun c:SCHUPDATE ( / self body bak f tst body2)
+  (princ (strcat "\n[SCH] v" *sch:version*
+                 " - checking GitHub for updates..."))
+  (setq self (sch:selfpath))
+  (cond
+    ((null self)
+     (princ "\n[SCH] Cannot locate the local SCH.lsp - set *sch:home* at the top of the file."))
+    (t
+     (setq body (sch:http-get (strcat *sch:raw-base* "SCH.lsp")))
+     (cond
+       ((or (null body) (< (strlen body) 1000)
+            (null (vl-string-search "(defun c:SCH " body)))
+        (princ "\n[SCH] Update failed - could not fetch a valid SCH.lsp from GitHub (check internet access)."))
+       (t
+        (setq bak (strcat self ".bak"))
+        (sch:catch 'vl-file-delete (list bak))
+        (sch:catch 'vl-file-copy (list self bak))
+        (setq f (open self "w"))
+        (if f
+          (progn
+            (princ body f)
+            (close f)
+            ;; refresh SCHTEST.lsp too when it sits beside SCH.lsp
+            (setq tst (strcat (vl-filename-directory self)
+                              "/SCHTEST.lsp"))
+            (if (findfile tst)
+              (progn
+                (setq body2 (sch:http-get (strcat *sch:raw-base*
+                                                  "SCHTEST.lsp")))
+                (if (and body2 (> (strlen body2) 500))
+                  (progn
+                    (setq f (open tst "w"))
+                    (if f (progn (princ body2 f) (close f)))))))
+            (princ (strcat "\n[SCH] Updated from GitHub (backup: "
+                           bak "). Reloading..."))
+            (load self nil)
+            (princ "\n[SCH] Done."))
+          (princ "\n[SCH] Update failed - SCH.lsp is write-protected or in use."))))))
+  (princ))
+
+;;; ------------------------------------------------------------------
 ;;; c:SCHHELP - quick reference pop-up
 ;;; ------------------------------------------------------------------
 
@@ -2189,14 +2322,19 @@
     "DSLD standards and marked 'verify' in the notes.\n"
     "\n"
     "SCHDIAG - diagnostics report (read-only, safe anywhere)\n"
+    "SCHUPDATE - pull the latest version from GitHub\n"
+    "SCHUNINSTALL - remove the automatic loading\n"
     "SCHHELP - this help\n"
     "\n"
-    "Wording and calibration live at the top of SCH.lsp:\n"
-    "description map, size catalogs, trim allowances, and the\n"
-    "LH/RH convention."))
+    "SCH loads automatically in every drawing after the first\n"
+    "load (via acaddoc.lsp). Wording and calibration live at\n"
+    "the top of SCH.lsp: description map, size catalogs, trim\n"
+    "allowances, and the LH/RH convention."))
   (princ))
 
 ;;; ------------------------------------------------------------------
 
-(princ "\n[SCH] Loaded. Commands: SCH (fill schedule), SCHDIAG (diagnostics), SCHHELP (help).")
+(princ (strcat "\n[SCH] v" *sch:version*
+               " loaded. Commands: SCH, SCHDIAG, SCHHELP, SCHUPDATE."))
+(sch:autoinstall)
 (princ)
