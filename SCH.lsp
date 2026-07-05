@@ -495,6 +495,95 @@
           (if (> (sch:vdot (sch:vscale dvec -0.5) leftdir) 0.0)
             "LH" "RH"))))))
 
+;; ------------------------------------------------------------------
+;; Probe-based swing detection (no explode, no command line): cast a
+;; temporary line across the swing region and intersect it with the
+;; door entity itself. A 90-degree-open door's leaf lies at the hinge
+;; end of its bbox; the arc crossing lies mid-span. Works on AEC
+;; doors in BricsCAD where explode and properties are sealed.
+;; ------------------------------------------------------------------
+
+;; pure decision: a0/a1 = door extent along the wall, hingeA = hinge
+;; position along the wall, swingn = unit normal toward the swing
+;; side, wdir = wall direction. Convention as sch:hand-calc.
+(defun sch:probe-decide (a0 a1 hingeA swingn wdir / viewdir leftdir
+                          centerA dotv)
+  (setq viewdir swingn)
+  (if (= (strcase *sch:hand-convention*) "TOWARD")
+    (setq viewdir (sch:vscale viewdir -1.0)))
+  (setq leftdir (sch:vperp viewdir)
+        centerA (/ (+ a0 a1) 2.0)
+        dotv (sch:vdot (sch:vscale wdir (- hingeA centerA)) leftdir))
+  (if (> dotv 0.0) "LH" "RH"))
+
+(defun sch:door-hand-probe (vlaDoor walls / bb mn mx c wrec wp1 wp2
+                             wdir wnorm alongv perpv a0 a1 dpth swingn
+                             d margin p1 p2 probe raw alongs minI maxI
+                             hingeA hand n doc msp pt)
+  (setq bb (sch:bbox vlaDoor))
+  (setq c (if bb (mapcar '(lambda (a b) (/ (+ a b) 2.0))
+                         (car bb) (cadr bb))))
+  (setq wrec (if c (sch:nearest-wall c walls 30.0)))
+  (if wrec
+    (progn
+      (setq mn (car bb) mx (cadr bb)
+            wp1 (car wrec) wp2 (cadr wrec)
+            wdir (sch:vunit (sch:v- wp2 wp1))
+            wnorm (sch:vperp wdir)
+            dpth 0.0)
+      (foreach pt (list (sch:pt2 mn)
+                        (list (car mn) (cadr mx))
+                        (list (car mx) (cadr mn))
+                        (sch:pt2 mx))
+        (setq alongv (sch:vdot (sch:v- pt wp1) wdir)
+              perpv (sch:vdot (sch:v- pt wp1) wnorm))
+        (if (or (null a0) (< alongv a0)) (setq a0 alongv))
+        (if (or (null a1) (> alongv a1)) (setq a1 alongv))
+        (if (> (abs perpv) (abs dpth)) (setq dpth perpv)))
+      ;; needs real swing-side depth (leaf sticking out of the wall);
+      ;; sliders/garage/bifold have none and correctly get no hand
+      (if (and (> (sch:vlen wdir) 1e-9) (> (abs dpth) 6.0))
+        (progn
+          (setq swingn (sch:vscale wnorm (if (> dpth 0.0) 1.0 -1.0))
+                d (* 0.7 (abs dpth))
+                margin 2.0
+                doc (vla-get-ActiveDocument (vlax-get-acad-object))
+                msp (vla-get-ModelSpace doc)
+                p1 (sch:v+ (sch:v+ (sch:pt2 wp1)
+                                   (sch:vscale wdir (- a0 margin)))
+                           (sch:vscale swingn d))
+                p2 (sch:v+ (sch:v+ (sch:pt2 wp1)
+                                   (sch:vscale wdir (+ a1 margin)))
+                           (sch:vscale swingn d))
+                probe (sch:invoke msp 'AddLine
+                        (list (list (car p1) (cadr p1) 0.0)
+                              (list (car p2) (cadr p2) 0.0))))
+          (if probe
+            (progn
+              (setq raw (sch:invoke probe 'IntersectWith
+                          (list vlaDoor 0))) ; acExtendNone
+              (sch:catch 'vla-Delete (list probe))
+              (setq alongs nil)
+              (while (and raw (cddr raw))
+                (setq alongs
+                  (cons (sch:vdot (sch:v- (list (car raw) (cadr raw))
+                                          wp1)
+                                  wdir)
+                        alongs)
+                      raw (cdddr raw)))
+              (setq n (length alongs))
+              ;; 1-2 hits = single leaf (+arc); more = double door etc
+              (if (and (> n 0) (<= n 2))
+                (progn
+                  (setq minI (apply 'min alongs)
+                        maxI (apply 'max alongs)
+                        hingeA (if (< (abs (- minI a0))
+                                      (abs (- maxI a1)))
+                                 a0 a1)
+                        hand (sch:probe-decide a0 a1 hingeA swingn
+                                               wdir))))))))))
+  hand)
+
 ;; Determine hand of a door vla-object. walls = wall records.
 ;; Returns "LH" / "RH" / nil.
 (defun sch:door-hand (vlaDoor walls / prims arcs lines best bestr ad
@@ -555,6 +644,9 @@
           (if (and wallP1 wallP2)
             (setq hand (sch:hand-calc hinge r a1 a2 wallP1 wallP2)))))
       (sch:del-ents prims)))
+  ;; explode unavailable or inconclusive (BricsCAD): probe method
+  (if (null hand)
+    (setq hand (sch:door-hand-probe vlaDoor walls)))
   hand)
 
 ;;; ------------------------------------------------------------------
@@ -1799,6 +1891,9 @@
             (if (null walls) (setq walls (sch:collect-walls)))
             (setq hand (sch:door-hand v walls))
             (sch:diag-out nil (strcat "    computed hand: "
+                                      (if hand hand "UNKNOWN")))
+            (setq hand (sch:door-hand-probe v walls))
+            (sch:diag-out nil (strcat "    probe-based hand: "
                                       (if hand hand "UNKNOWN")))))
         (if (= on "AecDbWall")
           (progn

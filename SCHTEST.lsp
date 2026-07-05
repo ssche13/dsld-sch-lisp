@@ -111,6 +111,26 @@
                              (list 0.0 0.0) (list 100.0 0.0))
               "RH")
   (setq *sch:hand-convention* old)
+  ;; --- probe hand decision (wall +X, swing up/+Y) ---
+  (tst:assert "probe-decide hinge west = LH"
+              (sch:probe-decide 0.0 32.0 0.0
+                                (list 0.0 1.0) (list 1.0 0.0))
+              "LH")
+  (tst:assert "probe-decide hinge east = RH"
+              (sch:probe-decide 0.0 32.0 32.0
+                                (list 0.0 1.0) (list 1.0 0.0))
+              "RH")
+  (setq *sch:hand-convention* "TOWARD")
+  (tst:assert "probe-decide TOWARD flips"
+              (sch:probe-decide 0.0 32.0 0.0
+                                (list 0.0 1.0) (list 1.0 0.0))
+              "RH")
+  (setq *sch:hand-convention* old)
+  ;; swing-down mirror case: hinge east, opens toward -Y = LH
+  (tst:assert "probe-decide swing-down hinge east = LH"
+              (sch:probe-decide 0.0 32.0 32.0
+                                (list 0.0 -1.0) (list 1.0 0.0))
+              "LH")
   ;; --- insert transform ---
   (tst:assert "xform translate"
               (sch:xform-pt (list 10.0 5.0) (list 100.0 200.0) 0.0 1.0 1.0)
