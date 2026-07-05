@@ -2181,6 +2181,10 @@
 ;; Idempotent - the SCH-AUTOLOAD marker prevents duplicates.
 (defun sch:autoinstall ( / self tgt f dir)
   (setq self (sch:selfpath))
+  (if (null self)
+    (princ (strcat "\n[SCH] Auto-load not installed: SCH.lsp is not at "
+                   *sch:home*
+                   " - edit *sch:home* at the top of the file to this machine's path and reload.")))
   (if self
     (progn
       (setq tgt (findfile "acaddoc.lsp"))
