@@ -42,7 +42,8 @@
 ;;; Configuration
 ;;; ------------------------------------------------------------------
 
-(setq *sch:version* "2.4")
+(setq *sch:version* "2.5")
+(setq *sch:layer* "SCH")          ; layer for charts SCH creates
 (setq *sch:home* "E:/Megans lisp routines/SCH.lsp") ; default install path
 (setq *sch:raw-base*
   "https://raw.githubusercontent.com/ssche13/dsld-sch-lisp/main/")
@@ -1227,6 +1228,14 @@
         (setq i (1+ i)))))
   (reverse out))
 
+;; make sure a layer exists (created color 7 / continuous when new)
+(defun sch:ensure-layer (name / doc)
+  (if (and name (/= name "") (null (tblsearch "LAYER" name)))
+    (progn
+      (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
+      (sch:catch 'vla-Add (list (vla-get-Layers doc) name))))
+  name)
+
 ;; create a DSLD-format schedule table at pt (top-left corner).
 ;; ndata = expected data rows (3 blank spare rows are added).
 ;; Matches the DSLD sheets: cols MARK|WIDTH|HEIGHT|QTY|DESCRIPTION,
@@ -1241,6 +1250,9 @@
                     (list (car pt) (cadr pt) 0.0) rows 5 12.0 57.6)))
   (if tbl
     (progn
+      ;; dedicated schedule layer
+      (sch:ensure-layer *sch:layer*)
+      (sch:catch 'vlax-put-property (list tbl 'Layer *sch:layer*))
       ;; use the DSLD table style if this drawing has it
       (sch:catch 'vlax-put-property (list tbl 'StyleName "DSLD Table Style"))
       (sch:invoke tbl 'SetRowHeight (list 0 14.0))

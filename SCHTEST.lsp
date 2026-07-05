@@ -542,6 +542,8 @@
       (tst:assert "created header row found" (if (cadr info) T nil) T)
       (tst:assert "created rows (2+2 data+3 spare)" (nth 3 info) 7)
       (tst:assert "created cols" (nth 4 info) 5)
+      (tst:assert "created on SCH layer"
+                  (sch:val->str (sch:prop tbl 'Layer)) "SCH")
       (setq aggs (sch:aggregate
                    (list (tst:make-rec "WINDOW" "" "3050" 1 36.0 60.0
                                        nil nil nil)
