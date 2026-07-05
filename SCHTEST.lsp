@@ -736,9 +736,17 @@
         (tst:out (strcat "    W " (vl-princ-to-string a))))))
   (princ))
 
+;; cross-document setup: create an SCH-owned chart in the CURRENT
+;; drawing (run this in doc 1 before switching to doc 2)
+(defun c:SCHXPREP ( / res)
+  (setq res (sch:make-table "DOOR SCHEDULE" (list 0.0 0.0) 2))
+  (princ (if res "\n[SCHXPREP] SCH chart created."
+           "\n[SCHXPREP] FAILED to create chart."))
+  (princ))
+
 ;; cross-document test: run in a drawing WITHOUT charts while another
-;; open drawing HAS them - resolve must find and write there.
-;; (Set *tst:path* before calling when the current doc is unsaved.)
+;; open drawing has an SCH-created one - resolve must find and write
+;; there. (Set *tst:path* before calling when the doc is unsaved.)
 (defun c:SCHXDOC ( / res tbl info r old new)
   (if (null *tst:path*)
     (setq *tst:path* (strcat (getvar "TEMPPREFIX") "SCHTEST-log.txt")))
@@ -755,21 +763,19 @@
       (setq tbl (car res) info (cadr res))
       (tst:out (strcat "  title: \"" (car info) "\"  rows="
                        (itoa (nth 3 info))))
-      (setq r (cdr (assoc "1" (nth 5 info))))
-      (tst:assert "mark 1 row readable" (if r T nil) T)
+      ;; write into the first data row's MARK cell, then restore
+      (setq r (if (cadr info) (1+ (cadr info))))
+      (tst:assert "data row available"
+                  (if (and r (< r (nth 3 info))) T nil) T)
       (if r
         (progn
-          (setq old (sch:strip-fmt
-                      (sch:tbl-get tbl r (sch:col info "QTY"))))
-          (sch:tbl-set tbl r (sch:col info "QTY") "99")
-          (setq new (sch:strip-fmt
-                      (sch:tbl-get tbl r (sch:col info "QTY"))))
-          (tst:assert "cross-doc write + readback" new "99")
-          (sch:tbl-set tbl r (sch:col info "QTY") old)
+          (setq old (sch:strip-fmt (sch:tbl-get tbl r 0)))
+          (sch:tbl-set tbl r 0 "XD")
+          (setq new (sch:strip-fmt (sch:tbl-get tbl r 0)))
+          (tst:assert "cross-doc write + readback" new "XD")
+          (sch:tbl-set tbl r 0 old)
           (tst:assert "cross-doc restore"
-                      (sch:strip-fmt
-                        (sch:tbl-get tbl r (sch:col info "QTY")))
-                      old)))))
+                      (sch:strip-fmt (sch:tbl-get tbl r 0)) old)))))
   (tst:out (strcat "RESULT: " (itoa *tst:pass*) " passed, "
                    (itoa *tst:fail*) " failed"))
   (princ))

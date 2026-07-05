@@ -1213,10 +1213,13 @@
         (setq r (1+ r)))))
   (list title hdr colmap rows cols (reverse marks)))
 
-;; all tables whose title matches pat AND that have a MARK header row
-;; -> list of (tbl info)
+;; SCH-owned tables (on the SCH layer) whose title matches pat AND
+;; that have a MARK header row -> list of (tbl info). Legacy charts
+;; the routine did not create are ignored on purpose - move a chart
+;; onto the SCH layer to hand it over to the routine.
 (defun sch:find-tables (pat / ss i tbl info out)
-  (setq ss (ssget "_X" '((0 . "ACAD_TABLE"))))
+  (setq ss (ssget "_X" (list (cons 0 "ACAD_TABLE")
+                             (cons 8 *sch:layer*))))
   (if ss
     (progn
       (setq i 0)
@@ -1299,7 +1302,10 @@
                  (sch:catch
                    '(lambda ()
                       (vlax-for o msp
-                        (if (= (sch:prop o 'ObjectName) "AcDbTable")
+                        (if (and (= (sch:prop o 'ObjectName) "AcDbTable")
+                                 (= (strcase (sch:val->str
+                                               (sch:prop o 'Layer)))
+                                    (strcase *sch:layer*)))
                           (progn
                             (setq info (sch:table-info o))
                             (if (and (wcmatch (strcase (car info)) pat)
@@ -1347,8 +1353,8 @@
                          " further candidate(s) in other drawings ignored)")))
         (car other))
        (t
-        (princ (strcat "\n[SCH] No " title
-                       " found in this or any open drawing."))
+        (princ (strcat "\n[SCH] No SCH-created " title
+                       " found in this or any open drawing (charts the routine did not create are ignored)."))
         (setq pt (getpoint (strcat "\nPick top-left corner for a new "
                                    title " (Enter to skip): ")))
         (if pt
@@ -2315,12 +2321,14 @@
     "     box are included - interior + exterior in one scan.\n"
     "     Type All (or run from a paper-space layout) to scan\n"
     "     the entire model space instead.\n"
-    "  2. Existing charts are found automatically - in THIS\n"
-    "     drawing first, then in any other OPEN drawing (so a\n"
-    "     scan in the Exterior construct updates the charts\n"
+    "  2. SCH manages its OWN charts (on the SCH layer) - in\n"
+    "     THIS drawing first, then in any other OPEN drawing\n"
+    "     (so a scan in the Exterior construct updates charts\n"
     "     living in the Interior construct - keep both open).\n"
-    "     If none exist anywhere, pick a point and SCH creates\n"
-    "     them in DSLD format.\n"
+    "     Legacy hand-made charts are ignored and untouched;\n"
+    "     if none of SCH's charts exist, pick a point and it\n"
+    "     creates them in DSLD format. To hand an old chart\n"
+    "     over to SCH, move it onto the SCH layer.\n"
     "  3. Preview before anything is written:\n"
     "       + new row   ~ changed   = unchanged   ! kept\n"
     "     LH/RH placement: columns after QTY, or in the\n"
