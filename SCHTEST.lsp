@@ -734,6 +734,44 @@
         (tst:out (strcat "    W " (vl-princ-to-string a))))))
   (princ))
 
+;; cross-document test: run in a drawing WITHOUT charts while another
+;; open drawing HAS them - resolve must find and write there.
+;; (Set *tst:path* before calling when the current doc is unsaved.)
+(defun c:SCHXDOC ( / res tbl info r old new)
+  (if (null *tst:path*)
+    (setq *tst:path* (strcat (getvar "TEMPPREFIX") "SCHTEST-log.txt")))
+  (setq *tst:pass* 0 *tst:fail* 0)
+  (tst:out "== SCHXDOC cross-document test ==")
+  (setq res (sch:resolve-table "DOOR SCHEDULE" "*DOOR*" 2))
+  (tst:assert "cross-doc table found" (if res T nil) T)
+  (if res
+    (progn
+      (tst:out (strcat "  source drawing: "
+                       (vl-princ-to-string (caddr res))))
+      (tst:assert "found in ANOTHER drawing"
+                  (if (caddr res) T nil) T)
+      (setq tbl (car res) info (cadr res))
+      (tst:out (strcat "  title: \"" (car info) "\"  rows="
+                       (itoa (nth 3 info))))
+      (setq r (cdr (assoc "1" (nth 5 info))))
+      (tst:assert "mark 1 row readable" (if r T nil) T)
+      (if r
+        (progn
+          (setq old (sch:strip-fmt
+                      (sch:tbl-get tbl r (sch:col info "QTY"))))
+          (sch:tbl-set tbl r (sch:col info "QTY") "99")
+          (setq new (sch:strip-fmt
+                      (sch:tbl-get tbl r (sch:col info "QTY"))))
+          (tst:assert "cross-doc write + readback" new "99")
+          (sch:tbl-set tbl r (sch:col info "QTY") old)
+          (tst:assert "cross-doc restore"
+                      (sch:strip-fmt
+                        (sch:tbl-get tbl r (sch:col info "QTY")))
+                      old)))))
+  (tst:out (strcat "RESULT: " (itoa *tst:pass*) " passed, "
+                   (itoa *tst:fail*) " failed"))
+  (princ))
+
 ;;; ------------------------------------------------------------------
 
 (defun c:SCHTEST ( / fh)

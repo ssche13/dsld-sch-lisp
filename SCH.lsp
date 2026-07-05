@@ -1261,16 +1261,50 @@
         (setq c (1+ c)))
       (list tbl (sch:table-info tbl)))))
 
+;; schedule tables in OTHER open drawings (same session) - this is
+;; how a scan in the Exterior construct updates the charts that live
+;; in the Interior construct. Returns ((tbl info docname) ...).
+(defun sch:find-tables-docs (pat / acad active aname docs out name msp
+                              info)
+  (setq acad (vlax-get-acad-object)
+        active (vla-get-ActiveDocument acad)
+        aname (strcase (sch:val->str (sch:prop active 'Name)))
+        docs (sch:catch 'vla-get-Documents (list acad)))
+  (if docs
+    (sch:catch
+      '(lambda ()
+         (vlax-for d docs
+           (setq name (sch:val->str (sch:prop d 'Name)))
+           (if (/= (strcase name) aname)
+             (progn
+               (setq msp (sch:catch 'vla-get-ModelSpace (list d)))
+               (if msp
+                 (sch:catch
+                   '(lambda ()
+                      (vlax-for o msp
+                        (if (= (sch:prop o 'ObjectName) "AcDbTable")
+                          (progn
+                            (setq info (sch:table-info o))
+                            (if (and (wcmatch (strcase (car info)) pat)
+                                     (cadr info))
+                              (setq out
+                                (cons (list o info name) out)))))))
+                   nil))))))
+      nil))
+  (reverse out))
+
 ;; locate the schedule table for one kind, or create it where the
-;; user points. Exactly one match -> used automatically; several ->
-;; user picks; none -> user picks an insertion point for a new one.
-;; Returns (tbl info) or nil.
-(defun sch:resolve-table (title pat ndata / cands tbl info pt)
+;; user points. Exactly one local match -> used automatically;
+;; several -> user picks; none locally -> other OPEN drawings are
+;; searched (ext scan updates the int construct's charts); still
+;; none -> user picks an insertion point for a new one.
+;; Returns (tbl info docname-or-nil) or nil.
+(defun sch:resolve-table (title pat ndata / cands tbl info pt other)
   (setq cands (sch:find-tables pat))
   (cond
     ((= (length cands) 1)
      (princ (strcat "\n[SCH] Found existing " title " - using it."))
-     (car cands))
+     (append (car cands) (list nil)))
     ((> (length cands) 1)
      (princ (strcat "\n[SCH] " (itoa (length cands))
                     " tables match " title " (multiple schedule sets)."))
@@ -1281,15 +1315,27 @@
        (progn
          (setq info (sch:table-info tbl))
          (if (cadr info)
-           (list tbl info)
+           (list tbl info nil)
            (progn
              (princ "\n[SCH] That table has no MARK header row - skipped.")
              nil)))))
     (t
-     (princ (strcat "\n[SCH] No " title " found in this drawing."))
-     (setq pt (getpoint (strcat "\nPick top-left corner for a new "
-                                title " (Enter to skip): ")))
-     (if pt (sch:make-table title pt ndata)))))
+     (setq other (sch:find-tables-docs pat))
+     (cond
+       (other
+        (princ (strcat "\n[SCH] Found " title " in open drawing \""
+                       (caddr (car other)) "\" - updating it there."))
+        (if (> (length other) 1)
+          (princ (strcat " (" (itoa (1- (length other)))
+                         " further candidate(s) in other drawings ignored)")))
+        (car other))
+       (t
+        (princ (strcat "\n[SCH] No " title
+                       " found in this or any open drawing."))
+        (setq pt (getpoint (strcat "\nPick top-left corner for a new "
+                                   title " (Enter to skip): ")))
+        (if pt
+          (append (sch:make-table title pt ndata) (list nil))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Merge: aggregated data + existing table -> planned rows
@@ -1816,6 +1862,16 @@
              (setq notes (cons (strcat "Tag mark " (sch:rget r "MARK")
                                        ": no size tag paired")
                                notes))))
+         (if (and wres (caddr wres))
+           (setq notes (cons (strcat "Window schedule is in open drawing \""
+                                     (caddr wres)
+                                     "\" - it updates there (undo there too).")
+                             notes)))
+         (if (and dres (caddr dres))
+           (setq notes (cons (strcat "Door schedule is in open drawing \""
+                                     (caddr dres)
+                                     "\" - it updates there (undo there too).")
+                             notes)))
          (setq notes (reverse notes))
          (if (null *sch:handmode*) (setq *sch:handmode* "cols"))
          (setq ok (sch:preview (if wplanr wplanr '())
@@ -2110,9 +2166,12 @@
     "     box are included - interior + exterior in one scan.\n"
     "     Type All (or run from a paper-space layout) to scan\n"
     "     the entire model space instead.\n"
-    "  2. Existing charts are found automatically; if none\n"
-    "     exist you pick a point and SCH creates them in DSLD\n"
-    "     format.\n"
+    "  2. Existing charts are found automatically - in THIS\n"
+    "     drawing first, then in any other OPEN drawing (so a\n"
+    "     scan in the Exterior construct updates the charts\n"
+    "     living in the Interior construct - keep both open).\n"
+    "     If none exist anywhere, pick a point and SCH creates\n"
+    "     them in DSLD format.\n"
     "  3. Preview before anything is written:\n"
     "       + new row   ~ changed   = unchanged   ! kept\n"
     "     LH/RH placement: columns after QTY, or in the\n"
