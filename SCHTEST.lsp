@@ -182,9 +182,12 @@
               (sch:snap-std "DOOR" 40.0 80.0 T nil)
               (list 32.0 80.0
                     "INTERIOR GRADE - HOLLOW CORE - SEE P.O." T))
-  (tst:assert "snap window 41 incl casing -> 3'-0\"x6'-0\""
-              (sch:snap-std "WINDOW" 41.0 72.0 T nil)
+  (tst:assert "snap window 43 incl casing -> 3'-0\"x6'-0\""
+              (sch:snap-std "WINDOW" 43.0 72.0 T nil)
               (list 36.0 72.0 "1/1 EQ. SASH - VINYL SINGLE HUNG" T))
+  (tst:assert "snap garage 195 -> 16'x7'"
+              (sch:snap-std "DOOR" 195.0 nil T nil)
+              (list 192.0 84.0 "OVERHEAD GARAGE DOOR" T))
   (tst:assert "snap cased opening no allowance"
               (sch:snap-std "DOOR" 42.0 96.0 T T)
               (list 42.0 96.0 "CASED OPENING" T))
@@ -589,6 +592,120 @@
       (sch:catch 'vla-Delete (list dtbl))))
   (princ))
 
+;; ------------------------------------------------------------------
+;; Real-AEC diagnostics (produce output only when AEC content exists)
+;; ------------------------------------------------------------------
+
+;; can xref block definitions be walked in this host? Both channels.
+(defun tst:xref-walk ( / ss i v bname bd bdef e typ cnt d w tag ccnt
+                         firstw recs)
+  (setq ss (ssget "_X" '((0 . "INSERT"))))
+  (if ss
+    (progn
+      (setq i 0)
+      (while (< i (sslength ss))
+        (setq v (sch:vla (ssname ss i))
+              bname (sch:val->str (sch:prop v 'Name)))
+        (setq bd (sch:catch 'vla-Item
+                   (list (vla-get-Blocks
+                           (vla-get-ActiveDocument
+                             (vlax-get-acad-object)))
+                         bname)))
+        (if (and bd (= (sch:prop bd 'IsXRef) :vlax-true))
+          (progn
+            (setq bdef (tblsearch "BLOCK" bname))
+            (setq e (if bdef (cdr (assoc -2 bdef))))
+            (tst:out (strcat "  XREF \"" bname "\": tblsearch="
+                             (if bdef "ok" "NIL") "  first-ent="
+                             (if e "ok" "NIL")))
+            (setq cnt 0 d 0 w 0 tag 0)
+            (if e (tst:out (strcat "    test start-handle: "
+                                   (cdr (assoc 5 (entget e))))))
+            (while e
+              (setq typ (cdr (assoc 0 (entget e)))
+                    cnt (1+ cnt))
+              (cond ((= typ "AEC_DOOR") (setq d (1+ d)))
+                    ((= typ "AEC_WINDOW") (setq w (1+ w)))
+                    ((= typ "AEC_MVBLOCK_REF") (setq tag (1+ tag))))
+              (setq e (entnext e)))
+            (tst:out (strcat "    entnext walk: " (itoa cnt)
+                             " ents (" (itoa d) " doors, " (itoa w)
+                             " windows, " (itoa tag) " tags)"))
+            (setq ccnt 0)
+            (sch:catch '(lambda ()
+                          (vlax-for x bd (setq ccnt (1+ ccnt))))
+                       nil)
+            (tst:out (strcat "    COM iteration: " (itoa ccnt)
+                             " ents"))
+            ;; bbox on the first xref-resident window
+            (setq e (if bdef (cdr (assoc -2 bdef))) firstw nil)
+            (while (and e (null firstw))
+              (if (= (cdr (assoc 0 (entget e))) "AEC_WINDOW")
+                (setq firstw e))
+              (setq e (entnext e)))
+            (if firstw
+              (tst:out (strcat "    first window bbox: "
+                               (vl-princ-to-string
+                                 (sch:bbox (sch:vla firstw))))))
+            ;; direct harvest with an unbounded region
+            (setq recs (sch:harvest-xref v (list -1.0e9 -1.0e9)
+                                         (list 1.0e9 1.0e9) nil))
+            (tst:out (strcat "    harvest-xref whole-extent records: "
+                             (itoa (length recs))))
+            (tst:out (strcat "    xref-last: "
+                             (vl-princ-to-string *sch:xref-last*)))
+            (if recs
+              (tst:out (strcat "    sample record: "
+                               (vl-princ-to-string (car recs)))))))
+        (setq i (1+ i)))))
+  (princ))
+
+;; per-door probe internals on real AEC doors (first 12)
+(defun tst:probe-doors ( / ss i n v walls hand bb pl)
+  (setq ss (ssget "_X" '((0 . "AEC_DOOR"))))
+  (if ss
+    (progn
+      (setq walls (sch:collect-walls))
+      (tst:out (strcat "  wall records: " (itoa (length walls))))
+      (setq i 0 n (min 12 (sslength ss)))
+      (while (< i n)
+        (setq v (sch:vla (ssname ss i))
+              bb (sch:bbox v)
+              hand (sch:door-hand-probe v walls)
+              pl *sch:probe-last*)
+        (tst:out (strcat "  door " (itoa (1+ i))
+                         "  bbox=" (if bb
+                                     (strcat (rtos (- (car (cadr bb))
+                                                      (car (car bb))) 2 1)
+                                             " x "
+                                             (rtos (- (cadr (cadr bb))
+                                                      (cadr (car bb))) 2 1))
+                                     "NIL")
+                         "  hand=" (if hand hand "UNKNOWN")
+                         "  probe=" (vl-princ-to-string pl)))
+        (setq i (1+ i)))))
+  (princ))
+
+;; end-to-end sheet-style harvest: entire model space incl. all
+;; xrefs (the paper-space / [All] path), then aggregation
+(defun tst:harvest-all ( / recs waggs daggs a)
+  (if (null (ssget "_X" '((0 . "AEC_DOOR,AEC_WINDOW,INSERT"))))
+    (tst:out "  SKIP harvest-all: nothing to scan")
+    (progn
+      (setq recs (sch:harvest-core (list -1.0e12 -1.0e12)
+                                   (list 1.0e12 1.0e12) T))
+      (tst:out (strcat "  harvest-all records: "
+                       (itoa (length recs))))
+      (setq waggs (sch:aggregate recs "WINDOW")
+            daggs (sch:aggregate recs "DOOR"))
+      (tst:out (strcat "  door agg rows: " (itoa (length daggs))))
+      (foreach a daggs
+        (tst:out (strcat "    D " (vl-princ-to-string a))))
+      (tst:out (strcat "  window agg rows: " (itoa (length waggs))))
+      (foreach a waggs
+        (tst:out (strcat "    W " (vl-princ-to-string a))))))
+  (princ))
+
 ;;; ------------------------------------------------------------------
 
 (defun c:SCHTEST ( / fh)
@@ -604,6 +721,12 @@
                    "  dwg: " (getvar "DWGNAME")))
   (tst:out "-- census --")
   (tst:census)
+  (tst:out "-- xref walkability --")
+  (tst:xref-walk)
+  (tst:out "-- probe internals on real doors --")
+  (tst:probe-doors)
+  (tst:out "-- harvest-all (paper-space / All path) --")
+  (tst:harvest-all)
   (tst:out "-- unit tests --")
   (tst:units)
   (tst:out "-- integration tests (window/tags) --")

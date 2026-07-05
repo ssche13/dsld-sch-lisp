@@ -77,8 +77,10 @@
 ;; If snapped sizes come out one size SMALL, the door style measures
 ;; to the wall opening instead - change 8.0 to 3.0.
 (setq *sch:door-trim-allow* 8.0)
-(setq *sch:win-trim-allow* 5.0)
-(setq *sch:snap-tol* 4.0) ; max inches between measured and standard
+(setq *sch:win-trim-allow* 7.0)  ; empirical: real Timsbury windows
+                                 ; measure nominal + 7" over casing
+(setq *sch:snap-tol* 6.0) ; max inches between measured and standard
+                          ; (16' garage doors measure ~+5 over allowance)
 
 ;; DSLD standard catalog - mined from 61 real schedule tables across
 ;; 7 plan families (569 doors / 297 windows, QTY-weighted), ordered
@@ -516,10 +518,29 @@
         dotv (sch:vdot (sch:vscale wdir (- hingeA centerA)) leftdir))
   (if (> dotv 0.0) "LH" "RH"))
 
+;; group sorted 1D values into (center count) clusters by gap
+(defun sch:cluster-1d (vals tol / out cursum curn last x)
+  (if vals
+    (progn
+      (setq vals (vl-sort vals '<)
+            cursum (car vals) curn 1 last (car vals))
+      (foreach x (cdr vals)
+        (if (< (- x last) tol)
+          (setq cursum (+ cursum x) curn (1+ curn))
+          (progn
+            (setq out (cons (list (/ cursum curn) curn) out))
+            (setq cursum x curn 1)))
+        (setq last x))
+      (setq out (cons (list (/ cursum curn) curn) out))
+      (reverse out))))
+
 (defun sch:door-hand-probe (vlaDoor walls / bb mn mx c wrec wp1 wp2
                              wdir wnorm alongv perpv a0 a1 dpth swingn
                              d margin p1 p2 probe raw alongs minI maxI
-                             hingeA hand n doc msp pt)
+                             hingeA hand n doc msp pt clusters leafC
+                             arcC)
+  ;; diagnostics trail for SCHDIAG/SCHTEST
+  (setq *sch:probe-last* '(("stage" . "no-bbox")))
   (setq bb (sch:bbox vlaDoor))
   (setq c (if bb (mapcar '(lambda (a b) (/ (+ a b) 2.0))
                          (car bb) (cadr bb))))
@@ -571,17 +592,50 @@
                                   wdir)
                         alongs)
                       raw (cdddr raw)))
-              (setq n (length alongs))
-              ;; 1-2 hits = single leaf (+arc); more = double door etc
-              (if (and (> n 0) (<= n 2))
-                (progn
-                  (setq minI (apply 'min alongs)
-                        maxI (apply 'max alongs)
-                        hingeA (if (< (abs (- minI a0))
-                                      (abs (- maxI a1)))
-                                 a0 a1)
-                        hand (sch:probe-decide a0 a1 hingeA swingn
-                                               wdir))))))))))
+              ;; cluster hits within 3.5" - the leaf is a 3D panel so
+              ;; its two faces give a tight PAIR of points; the swing
+              ;; arc gives a lone point. Doors display partially open,
+              ;; and the arc always sweeps toward the STRIKE side, so
+              ;; the hinge is on the leaf-cluster side of the arc.
+              (setq clusters (sch:cluster-1d alongs 3.5)
+                    n (length clusters))
+              (setq *sch:probe-last*
+                (list (cons "stage" "probed") (cons "a0" a0)
+                      (cons "a1" a1) (cons "dpth" dpth)
+                      (cons "n" (length alongs))
+                      (cons "clusters" clusters)
+                      (cons "alongs" alongs)))
+              (cond
+                ((= n 2)
+                 (setq leafC (if (>= (cadr (car clusters))
+                                     (cadr (cadr clusters)))
+                              (car (car clusters))
+                              (car (cadr clusters)))
+                       arcC (if (>= (cadr (car clusters))
+                                    (cadr (cadr clusters)))
+                             (car (cadr clusters))
+                             (car (car clusters))))
+                 ;; both single points: leaf/arc indistinguishable
+                 (if (/= (cadr (car clusters)) (cadr (cadr clusters)))
+                   (setq hingeA (if (< leafC arcC) a0 a1)
+                         hand (sch:probe-decide a0 a1 hingeA swingn
+                                                wdir))))
+                ((= n 1)
+                 ;; leaf only (arc missed): hinge = nearest edge
+                 (setq minI (car (car clusters))
+                       hingeA (if (< (abs (- minI a0))
+                                     (abs (- minI a1)))
+                                a0 a1)
+                       hand (sch:probe-decide a0 a1 hingeA swingn
+                                              wdir))))))))))
+  (if (and (null hand) (null (cdr (assoc "n" *sch:probe-last*))))
+    (setq *sch:probe-last*
+      (append *sch:probe-last*
+              (list (cons "note"
+                          (cond ((null bb) "no bbox")
+                                ((null wrec) "no wall within 30in")
+                                ((<= (abs dpth) 6.0) "no swing depth")
+                                (t "no probe result")))))))
   hand)
 
 ;; Determine hand of a door vla-object. walls = wall records.
@@ -790,10 +844,44 @@
 ;; entget/entnext scan (no per-entity COM roundtrips - the old vlax-for
 ;; walk made huge xrefs unusably slow), transform candidate points to
 ;; world, keep those inside box p1-p2.
-(defun sch:harvest-xref (vlaIns p1 p2 walls / bname bdef e ed dxf nm ip
+(defun sch:harvest-xref (vlaIns p1 p2 walls / bname bdef e typ nm ip
                           rot sx sy out c wpt kind cased inserts v
-                          cnt nd nw)
+                          cnt nd nw kk vf cf inf samplec samplew dxfs
+                          cands tagcands cand wr)
   (setq bname (sch:val->str (sch:prop vlaIns 'Name)))
+  (setq bdef (tblsearch "BLOCK" bname))
+  (setq e (if bdef (cdr (assoc -2 bdef))))
+  (setq cnt 0 nd 0 nw 0 kk 0 vf 0 cf 0 inf 0 dxfs nil)
+  (if e (setq dxfs (list (cons "start-handle"
+                               (cdr (assoc 5 (entget e)))))))
+  ;; PASS 1: pure database walk - no COM calls at all (COM use during
+  ;; the walk proved able to break entget on AEC customs)
+  (while e
+    (setq typ (cdr (assoc 0 (entget e)))
+          cnt (1+ cnt))
+    (if (and (< (length dxfs) 12) (eq (type typ) 'STR)
+             (wcmatch typ "AEC*"))
+      (setq dxfs (cons typ dxfs)))
+    (cond
+      ((= typ "AEC_DOOR")
+       (setq cands (cons (list e "DOOR" nil) cands)))
+      ((= typ "AEC_WINDOW")
+       (setq cands (cons (list e "WINDOW" nil) cands)))
+      ((= typ "AEC_WINDOW_ASSEMBLY")
+       (setq cands (cons (list e "WINDOW" nil) cands)))
+      ((= typ "AEC_OPENING")
+       (setq cands (cons (list e "DOOR" T) cands)))
+      ((= typ "AEC_WALL")
+       (setq cands (cons (list e "WALL" nil) cands)))
+      ((and (= typ "INSERT")
+            (setq nm (cdr (assoc 2 (entget e))))
+            (wcmatch (strcase nm) "TK_DOOR_TAG*,TK_WINDOW_TAG*"))
+       (setq tagcands (cons (cons e (cdr (assoc 10 (entget e))))
+                            tagcands))))
+    (setq e (entnext e)))
+  (setq kk (length (vl-remove-if '(lambda (x) (= (cadr x) "WALL"))
+                                 cands)))
+  ;; PASS 2: COM work on the fixed candidate list
   (setq ip (sch:catch 'vlax-safearray->list
              (list (vlax-variant-value (vla-get-InsertionPoint vlaIns))))
         rot (sch:num-prop vlaIns "Rotation")
@@ -802,43 +890,60 @@
   (if (null rot) (setq rot 0.0))
   (if (null sx) (setq sx 1.0))
   (if (null sy) (setq sy 1.0))
-  (setq bdef (tblsearch "BLOCK" bname))
-  (setq e (if bdef (cdr (assoc -2 bdef))))
-  (setq cnt 0 nd 0 nw 0)
-  (while e
-    (setq cnt (1+ cnt)
-          ed (entget e)
-          dxf (cdr (assoc 0 ed))
-          kind nil cased nil)
-    (cond
-      ((= dxf "AEC_DOOR") (setq kind "DOOR"))
-      ((= dxf "AEC_WINDOW") (setq kind "WINDOW"))
-      ((= dxf "AEC_WINDOW_ASSEMBLY") (setq kind "WINDOW"))
-      ((= dxf "AEC_OPENING") (setq kind "DOOR" cased T)))
-    (cond
-      (kind
-       (setq v (sch:vla e)
-             c (if v (sch:bbox-center v)))
-       (if c
-         (progn
-           (setq wpt (sch:xform-pt c ip rot sx sy))
-           (if (sch:pt-in-box wpt p1 p2)
-             ;; note: hand detection skipped for xref-resident
-             ;; doors (cannot safely explode inside an xref)
-             (progn
-               (if (= kind "DOOR") (setq nd (1+ nd)) (setq nw (1+ nw)))
-               (setq out (cons (sch:harvest-aec v kind cased walls nil)
-                               out)))))))
-      ((and (= dxf "INSERT")
-            (setq nm (cdr (assoc 2 ed)))
-            (wcmatch (strcase nm) "TK_DOOR_TAG*,TK_WINDOW_TAG*"))
-       (setq c (cdr (assoc 10 ed)))
-       (if c
-         (progn
-           (setq wpt (sch:xform-pt c ip rot sx sy))
-           (if (sch:pt-in-box wpt p1 p2)
-             (setq inserts (cons (cons (sch:vla e) wpt) inserts)))))))
-    (setq e (entnext e)))
+  (if ip
+    (progn
+      ;; xref walls first, so cased openings inside the xref still
+      ;; get their 4"/6" host-wall classification
+      (foreach cand cands
+        (if (= (cadr cand) "WALL")
+          (progn
+            (setq v (sch:vla (car cand)))
+            (setq wr (if v (sch:wall-record v)))
+            (if wr
+              (setq walls
+                (cons (list (sch:xform-pt (car wr) ip rot sx sy)
+                            (sch:xform-pt (cadr wr) ip rot sx sy)
+                            (caddr wr))
+                      walls))))))
+      (foreach cand cands
+        (if (/= (cadr cand) "WALL")
+          (progn
+            (setq kind (cadr cand)
+                  cased (caddr cand)
+                  v (sch:vla (car cand)))
+            (if (null v) (setq vf (1+ vf)))
+            (setq c (if v (sch:bbox-center v)))
+            (if (and v (null c)) (setq cf (1+ cf)))
+            (if c
+              (progn
+                (setq wpt (sch:xform-pt c ip rot sx sy))
+                (if (null samplec) (setq samplec c samplew wpt))
+                (if (sch:pt-in-box wpt p1 p2)
+                  ;; note: hand detection skipped for xref-resident
+                  ;; doors (cannot safely explode inside an xref)
+                  (progn
+                    (if (= kind "DOOR")
+                      (setq nd (1+ nd))
+                      (setq nw (1+ nw)))
+                    (setq out (cons (sch:harvest-aec v kind cased
+                                                     walls nil)
+                                    out)))
+                  (setq inf (1+ inf))))))))
+      (foreach cand tagcands
+        (if (cdr cand)
+          (progn
+            (setq wpt (sch:xform-pt (cdr cand) ip rot sx sy))
+            (if (sch:pt-in-box wpt p1 p2)
+              (setq inserts (cons (cons (sch:vla (car cand)) wpt)
+                                  inserts))))))))
+  ;; diagnostics trail for SCHTEST/SCHDIAG
+  (setq *sch:xref-last*
+    (list (cons "xref" bname) (cons "scanned" cnt)
+          (cons "kind-matches" kk) (cons "vla-fail" vf)
+          (cons "bbox-fail" cf) (cons "outside-region" inf)
+          (cons "ip" ip) (cons "rot" rot) (cons "sx" sx)
+          (cons "sample-c" samplec) (cons "sample-wpt" samplew)
+          (cons "first-dxf" (reverse dxfs))))
   ;; per-xref readout: shows whether the xref could be scanned at all
   (princ (strcat "\n[SCH]   xref \"" bname "\": " (itoa cnt)
                  " entities scanned, " (itoa nd) " doors / " (itoa nw)
@@ -860,18 +965,45 @@
           (sch:harvest-tag-inserts inserts)))))
   out)
 
-;; main harvest: user picks two corners; returns list of records
-(defun sch:harvest ( / p1 p2 ss i n e v on walls recs inserts kind cased
-                       isxref bd nAd nAw nAo nPx nTag nXr)
-  (setq p1 (getpoint "\nSchedule area - first corner of plan region: "))
-  (if p1 (setq p2 (getcorner p1 "\nOpposite corner: ")))
-  (if (and p1 p2)
+;; main harvest: user picks two corners, chooses All, or is in a
+;; paper-space layout (sheet drawings that xref interior + exterior
+;; constructs together) - then the ENTIRE model space is scanned.
+(defun sch:harvest ( / p1 p2 allmode)
+  (cond
+    ((= (getvar "TILEMODE") 0)
+     (princ "\n[SCH] Paper space layout - scanning the ENTIRE model space (all xrefs, interior + exterior together).")
+     (setq allmode T
+           p1 (list -1.0e12 -1.0e12)
+           p2 (list 1.0e12 1.0e12)))
+    (t
+     (initget "All")
+     (setq p1 (getpoint
+                "\nSchedule area - first corner of plan region or [All]: "))
+     (cond
+       ((= p1 "All")
+        (princ "\n[SCH] ALL mode - scanning the entire model space. NOTE: constructs holding several plan copies will count every copy; window one copy there instead.")
+        (setq allmode T
+              p1 (list -1.0e12 -1.0e12)
+              p2 (list 1.0e12 1.0e12)))
+       (p1 (setq p2 (getcorner p1 "\nOpposite corner: "))))))
+  (if (and p1 p2 (listp p1))
+    (sch:harvest-core p1 p2 allmode)))
+
+(defun sch:harvest-core (p1 p2 allmode / ss i n e v on walls recs inserts
+                           kind cased isxref bd nAd nAw nAo nPx nTag nXr)
+  (progn
     (progn
       (princ "\n[SCH] Scanning selection")
       (setq walls (sch:collect-walls))
       (setq nAd 0 nAw 0 nAo 0 nPx 0 nTag 0 nXr 0)
-      (setq ss (ssget "_C" p1 p2
-                 '((0 . "AEC_DOOR,AEC_WINDOW,AEC_WINDOW_ASSEMBLY,AEC_OPENING,INSERT,ACAD_PROXY_ENTITY"))))
+      ;; ALL mode uses a database scan (not view-dependent); region
+      ;; mode uses a crossing selection at the picked corners
+      (setq ss (if allmode
+                 (ssget "_X"
+                   '((0 . "AEC_DOOR,AEC_WINDOW,AEC_WINDOW_ASSEMBLY,AEC_OPENING,INSERT,ACAD_PROXY_ENTITY")
+                     (410 . "Model")))
+                 (ssget "_C" p1 p2
+                   '((0 . "AEC_DOOR,AEC_WINDOW,AEC_WINDOW_ASSEMBLY,AEC_OPENING,INSERT,ACAD_PROXY_ENTITY")))))
       (if ss
         (progn
           (setq i 0 n (sslength ss))
