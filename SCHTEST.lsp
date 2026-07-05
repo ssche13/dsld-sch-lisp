@@ -477,6 +477,34 @@
         ((not had3080)
          (tst:assert "table grew by one row"
                      (nth 3 info2) (1+ rowsBefore))))
+      ;; ADD mode: scanning another area accumulates counts
+      (setq *sch:addmode* T)
+      (setq aggs (sch:aggregate
+                   (list (tst:make-rec "DOOR" "5" "2868" 1 32.0 80.0
+                                       "LH" nil nil)
+                         (tst:make-rec "DOOR" "5" "2868" 1 32.0 80.0
+                                       "RH" nil nil))
+                   "DOOR"))
+      (setq plan (sch:merge tbl info2 aggs "DOOR"))
+      (setq *sch:addmode* nil)
+      (setq *sch:handmode* "cols")
+      (setq written (sch:apply-plan tbl info2 plan "DOOR"))
+      (setq info2 (sch:table-info tbl))
+      (setq r5 (cdr (assoc "5" (nth 5 info2))))
+      (if r5
+        (progn
+          (tst:assert "ADD mode QTY 5+2"
+                      (sch:strip-fmt
+                        (sch:tbl-get tbl r5 (sch:col info2 "QTY")))
+                      "7")
+          (tst:assert "ADD mode LH 3+1"
+                      (sch:strip-fmt
+                        (sch:tbl-get tbl r5 (sch:col info2 "LH")))
+                      "4")
+          (tst:assert "ADD mode RH 2+1"
+                      (sch:strip-fmt
+                        (sch:tbl-get tbl r5 (sch:col info2 "RH")))
+                      "3")))
       (tst:dump-table tbl info2 "DOOR AFTER")))
   (princ))
 

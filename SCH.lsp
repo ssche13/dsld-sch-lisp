@@ -55,6 +55,10 @@
 (setq *sch:use-explode* T)        ; nil = skip geometric swing-hand
                                   ; detection (set nil if it crashes)
 (setq *sch:diag-path* nil)        ; report path, set by SCHDIAG
+(setq *sch:qtymode* "replace")    ; "replace" = matched rows get this
+                                  ; scan's counts; "add" = counts are
+                                  ; ADDED (scanning another area)
+(setq *sch:addmode* nil)          ; internal merge switch
 (setq *sch:explode-broken* nil)   ; set T automatically after repeated
 (setq *sch:explode-fails* 0)      ; explode failures (session cache)
 
@@ -1491,6 +1495,19 @@
         (if (and (null desc) (= curd "") (not (nth 6 a)))
           (setq desc (sch:auto-desc kind (nth 10 a) (nth 11 a)
                                     (cadr a) (caddr a))))
+        ;; ADD mode: accumulate this scan's counts onto the row
+        (if *sch:addmode*
+          (progn
+            (setq qty (itoa (+ (atoi curq) (nth 3 a))))
+            (if (and (sch:col info "LH") (not (nth 6 a)))
+              (setq lh (itoa (+ (atoi (sch:strip-fmt
+                                        (sch:tbl-get tbl rowidx
+                                          (sch:col info "LH"))))
+                                (nth 4 a)))
+                    rh (itoa (+ (atoi (sch:strip-fmt
+                                        (sch:tbl-get tbl rowidx
+                                          (sch:col info "RH"))))
+                                (nth 5 a)))))))
         (setq flag
           (if (and (or (= wtxt "") (= curw wtxt))
                    (or (= htxt "") (= curh htxt))
@@ -1513,7 +1530,9 @@
                                                (sch:col info "QTY"))))
         (if (/= curq "")
           (setq plan (cons (list (cdr m) (car m) "" "" "" "" "" nil "!"
-                                 "in table, not found in selection")
+                                 (if *sch:addmode*
+                                   "kept (outside this scan)"
+                                   "in table, not found in selection"))
                            plan))))))
   (reverse plan))
 
@@ -1546,6 +1565,10 @@
   (write-line "    : radio_button { key = \"hm_cols\"; label = \"Insert LH / RH columns after QTY\"; }" f)
   (write-line "    : radio_button { key = \"hm_desc\"; label = \"Append counts to DESCRIPTION\"; }" f)
   (write-line "  }" f)
+  (write-line "  : boxed_radio_row { label = \"Counts in matched rows\"; key = \"qtymode\";" f)
+  (write-line "    : radio_button { key = \"qm_repl\"; label = \"Replace with this scan\"; }" f)
+  (write-line "    : radio_button { key = \"qm_add\"; label = \"Add to existing (scanning another area)\"; }" f)
+  (write-line "  }" f)
   (write-line "  : row {" f)
   (write-line "    : button { key = \"accept\"; label = \"Apply to Tables\"; is_default = true; }" f)
   (write-line "    : button { key = \"cancel\"; label = \"Cancel\"; is_cancel = true; }" f)
@@ -1561,31 +1584,48 @@
           (cond ((nth 7 p) (nth 7 p))
                 (t "(keep existing)"))))
 
-(defun sch:preview (wplan dplan notes / dclpath dclid ok line)
+;; refill the two schedule list_boxes (used live by the mode radios)
+(defun sch:preview-fill (wplan dplan)
+  (start_list "wlist")
+  (foreach p wplan (add_list (sch:plan-line p)))
+  (end_list)
+  (start_list "dlist")
+  (foreach p dplan (add_list (sch:plan-line p)))
+  (end_list)
+  (princ))
+
+(defun sch:preview (wplanR dplanR wplanA dplanA notes / dclpath dclid ok
+                     line)
+  (if (null *sch:qtymode*) (setq *sch:qtymode* "replace"))
+  ;; stash for the radio action callbacks
+  (setq *sch:pw-r* wplanR *sch:pd-r* dplanR
+        *sch:pw-a* wplanA *sch:pd-a* dplanA)
   (setq dclpath (sch:dcl-file)
         dclid (if dclpath (load_dialog dclpath) 0)
         ok nil)
   (if (and dclid (> dclid 0) (new_dialog "sch_preview" dclid))
     (progn
       (set_tile "summary"
-        (strcat "  " (itoa (length wplan)) " window rows, "
-                (itoa (length dplan)) " door rows.   "
-                "Flags:  + new row   ~ changed   = unchanged   ! attention"
+        (strcat "  " (itoa (length wplanR)) " window rows, "
+                (itoa (length dplanR)) " door rows.   "
+                "Flags:  + new row   ~ changed   = unchanged   ! kept"
                 "   |   MARK  WIDTH  HEIGHT  QTY  LH  RH  DESCRIPTION"))
-      (start_list "wlist")
-      (foreach p wplan (add_list (sch:plan-line p)))
-      (end_list)
-      (start_list "dlist")
-      (foreach p dplan (add_list (sch:plan-line p)))
-      (end_list)
+      (if (= *sch:qtymode* "add")
+        (sch:preview-fill wplanA dplanA)
+        (sch:preview-fill wplanR dplanR))
       (start_list "nlist")
       (if notes
         (foreach x notes (add_list x))
         (add_list "(none)"))
       (end_list)
       (set_tile (if (= *sch:handmode* "desc") "hm_desc" "hm_cols") "1")
+      (set_tile (if (= *sch:qtymode* "add") "qm_add" "qm_repl") "1")
       (action_tile "hm_cols" "(setq *sch:handmode* \"cols\")")
       (action_tile "hm_desc" "(setq *sch:handmode* \"desc\")")
+      (action_tile "qm_repl"
+        "(setq *sch:qtymode* \"replace\") (sch:preview-fill *sch:pw-r* *sch:pd-r*)")
+      (action_tile "qm_add"
+        "(setq *sch:qtymode* \"add\") (sch:preview-fill *sch:pw-a* *sch:pd-a*)")
       (action_tile "accept" "(done_dialog 1)")
       (action_tile "cancel" "(done_dialog 0)")
       (setq ok (= (start_dialog) 1)))
@@ -1593,14 +1633,18 @@
       ;; DCL failed - fall back to command-line preview + confirm
       (princ "\n--- SCH preview (dialog unavailable) ---")
       (princ "\nWINDOW SCHEDULE:")
-      (foreach p wplan
+      (foreach p wplanR
         (setq line (sch:plan-line p))
         (princ (strcat "\n  " (vl-string-translate "\t" " " line))))
       (princ "\nDOOR SCHEDULE:")
-      (foreach p dplan
+      (foreach p dplanR
         (setq line (sch:plan-line p))
         (princ (strcat "\n  " (vl-string-translate "\t" " " line))))
       (foreach x notes (princ (strcat "\n  NOTE: " x)))
+      (initget "Replace Add")
+      (setq line (getkword
+        "\nCounts in matched rows [Replace/Add] <Replace>: "))
+      (setq *sch:qtymode* (if (= line "Add") "add" "replace"))
       (initget "Yes No")
       (setq ok (= (getkword "\nApply to tables? [Yes/No] <No>: ") "Yes"))))
   ;; unload whenever a dialog was actually loaded (even if new_dialog
@@ -1703,7 +1747,8 @@
 ;;; ------------------------------------------------------------------
 
 (defun c:SCH ( / doc recs waggs daggs wres dres wtbl dtbl winfo dinfo
-                 wplan dplan notes ok n oldecho *error*)
+                 wplan dplan wplanr dplanr wplana dplana notes ok n
+                 oldecho *error*)
   (defun *error* (msg)
     (if doc (sch:catch 'vla-EndUndoMark (list doc)))
     (if oldecho (setvar "CMDECHO" oldecho))
@@ -1747,8 +1792,16 @@
      (if (and (null wtbl) (null dtbl))
        (princ "\n[SCH] No schedule tables available - cancelled.")
        (progn
-         (if winfo (setq wplan (sch:merge wtbl winfo waggs "WINDOW")))
-         (if dinfo (setq dplan (sch:merge dtbl dinfo daggs "DOOR")))
+         ;; two plans per table: Replace-counts and Add-counts; the
+         ;; preview radio picks which one gets applied
+         (setq *sch:addmode* nil)
+         (if winfo (setq wplanr (sch:merge wtbl winfo waggs "WINDOW")))
+         (if dinfo (setq dplanr (sch:merge dtbl dinfo daggs "DOOR")))
+         (setq *sch:addmode* T)
+         (if winfo (setq wplana (sch:merge wtbl winfo waggs "WINDOW")))
+         (if dinfo (setq dplana (sch:merge dtbl dinfo daggs "DOOR")))
+         (setq *sch:addmode* nil)
+         (setq wplan wplanr dplan dplanr)
          (foreach p (append wplan dplan)
            (if (and (nth 9 p) (/= (nth 9 p) ""))
              (setq notes (cons (strcat "Mark " (cadr p) ": " (nth 9 p))
@@ -1765,8 +1818,13 @@
                                notes))))
          (setq notes (reverse notes))
          (if (null *sch:handmode*) (setq *sch:handmode* "cols"))
-         (setq ok (sch:preview (if wplan wplan '()) (if dplan dplan '())
+         (setq ok (sch:preview (if wplanr wplanr '())
+                               (if dplanr dplanr '())
+                               (if wplana wplana '())
+                               (if dplana dplana '())
                                notes))
+         (if (= *sch:qtymode* "add")
+           (setq wplan wplana dplan dplana))
          (if ok
            (progn
              (setq n 0)
@@ -2039,6 +2097,47 @@
   (princ))
 
 ;;; ------------------------------------------------------------------
+;;; c:SCHHELP - quick reference pop-up
+;;; ------------------------------------------------------------------
 
-(princ "\n[SCH] Loaded. Commands: SCH (fill schedule), SCHDIAG (diagnostics).")
+(defun c:SCHHELP ()
+  (alert (strcat
+    "SCH - DSLD Schedule of Openings auto-fill\n"
+    "------------------------------------------------\n"
+    "SCH  Scan a plan area, fill or create the WINDOW and\n"
+    "     DOOR schedules.\n"
+    "  1. Pick two corners around ONE house. Xrefs inside the\n"
+    "     box are included - interior + exterior in one scan.\n"
+    "     Type All (or run from a paper-space layout) to scan\n"
+    "     the entire model space instead.\n"
+    "  2. Existing charts are found automatically; if none\n"
+    "     exist you pick a point and SCH creates them in DSLD\n"
+    "     format.\n"
+    "  3. Preview before anything is written:\n"
+    "       + new row   ~ changed   = unchanged   ! kept\n"
+    "     LH/RH placement: columns after QTY, or in the\n"
+    "     description.\n"
+    "     Counts: 'Replace with this scan' for re-scans of the\n"
+    "     same area; 'Add to existing' when scanning ANOTHER\n"
+    "     area (e.g. interior first, exterior later - counts\n"
+    "     accumulate on the same charts).\n"
+    "\n"
+    "LH/RH: stand on the side the door opens AWAY from;\n"
+    "hinge on your left = LH. Doubles, sliders and garage\n"
+    "doors are counted as 'swing unknown'.\n"
+    "Cased openings get the 4\"/6\" host-wall size in their\n"
+    "description. Sizes measured from geometry are snapped to\n"
+    "DSLD standards and marked 'verify' in the notes.\n"
+    "\n"
+    "SCHDIAG - diagnostics report (read-only, safe anywhere)\n"
+    "SCHHELP - this help\n"
+    "\n"
+    "Wording and calibration live at the top of SCH.lsp:\n"
+    "description map, size catalogs, trim allowances, and the\n"
+    "LH/RH convention."))
+  (princ))
+
+;;; ------------------------------------------------------------------
+
+(princ "\n[SCH] Loaded. Commands: SCH (fill schedule), SCHDIAG (diagnostics), SCHHELP (help).")
 (princ)
