@@ -42,7 +42,7 @@
 ;;; Configuration
 ;;; ------------------------------------------------------------------
 
-(setq *sch:version* "2.5")
+(setq *sch:version* "2.7")
 (setq *sch:layer* "SCH")          ; layer for charts SCH creates
 (setq *sch:home* "E:/Megans lisp routines/SCH.lsp") ; default install path
 (setq *sch:raw-base*
@@ -2302,8 +2302,13 @@
                     (if f (progn (princ body2 f) (close f)))))))
             (princ (strcat "\n[SCH] Updated from GitHub (backup: "
                            bak "). Reloading..."))
-            (load self nil)
-            (princ "\n[SCH] Done."))
+            ;; reload is the LAST action, guarded: redefining the
+            ;; function that is still executing is safe in BricsCAD but
+            ;; AutoCAD's engine is touchier about it
+            (if (vl-catch-all-error-p
+                  (vl-catch-all-apply 'load (list self)))
+              (princ "\n[SCH] Update saved but auto-reload failed - restart CAD (or APPLOAD SCH.lsp) to finish.")
+              (princ "\n[SCH] Done.")))
           (princ "\n[SCH] Update failed - SCH.lsp is write-protected or in use."))))))
   (princ))
 
@@ -2360,5 +2365,7 @@
 
 (princ (strcat "\n[SCH] v" *sch:version*
                " loaded. Commands: SCH, SCHDIAG, SCHHELP, SCHUPDATE."))
-(sch:autoinstall)
+;; guarded so that nothing the auto-installer does can abort or take
+;; down the host CAD while the file is loading
+(vl-catch-all-apply 'sch:autoinstall)
 (princ)
